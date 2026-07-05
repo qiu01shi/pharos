@@ -71,9 +71,9 @@ Built to answer two real pain points:
 
 ```
 pharos/
-├── core/             Token / Port / Entity / Graph (typed dataflow primitives)
-├── directors/        FN (topo) / SDF (feedback) / DE (event-driven)
-├── entities/         LLMAgent / Shell / Router / Memory / Python / ToolRegistry
+├── core/             Token / Port / Entity / Graph / PermissionPolicy (typed dataflow primitives)
+├── directors/        FN (topo) / SDF (feedback) / DE (event-driven) + shared safe_fire
+├── entities/         LLMAgent / Shell / Router / Memory / Python / ToolEntity / SubgraphEntity / ToolRegistry
 ├── llm/              LLMProvider Protocol + 5 providers + ReplayProvider
 │   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
 │   └── catalog/      Model metadata per provider (cost, context window)
@@ -105,6 +105,9 @@ pharos/
 - ✅ **`.env` loader** — auto-loads `~/.pharos/.env` (shell env wins, no `python-dotenv` dependency)
 - ✅ **Multi-port inputs** — `--input-extra port=value` seeds any number of `__in__.<port>` edges
 - ✅ **Template substitution** — `--var key=value` replaces `${NAME}` in double-quoted YAML strings
+- ✅ **Subgraph composability** — embed a whole graph as one node (`type: subgraph`), with its own Director (heterogeneous nested scheduling), YAML `ref`, and cycle detection
+- ✅ **Tools as first-class nodes** — `type: tool` schedules a single tool as a graph node with typed ports and its own RBAC
+- ✅ **General record/replay** — every entity's output tokens (shell / python / tool / subgraph, not just LLM) are captured and re-emitted for byte-equal offline replay
 
 ### What pharos deliberately doesn't do
 
@@ -219,6 +222,7 @@ The dataflow runtime has near-zero overhead — 90 concurrent entities finish in
 - [docs/quickstart.md](docs/quickstart.md) — install + first run
 - [docs/architecture.md](docs/architecture.md) — design rationale, layered contracts, token-hash semantics
 - [docs/cookbook.md](docs/cookbook.md) — real workflows (multi-reviewer, custom entities, streaming, SDF feedback, etc.)
+- [docs/ARCH-COMPOSABILITY.md](docs/ARCH-COMPOSABILITY.md) — tool nodes, subgraph embedding, general record/replay, unified RBAC
 - [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md) — [docs/P8-COMPLETE.md](docs/P8-COMPLETE.md) — per-phase retrospectives
 
 ---
@@ -239,13 +243,17 @@ The dataflow runtime has near-zero overhead — 90 concurrent entities finish in
 | B | Permission declarations + RBAC enforcement | ✅ |
 | MiniMax | MiniMax provider (Anthropic-compatible) + `.env` auto-load + real-API verification | ✅ |
 | Coding Agent | 7 coding tools (`bash/read/write/edit/delete/glob/grep`) + CLI integration | ✅ |
+| Arch pass | Unified `safe_fire`/`PermissionPolicy`, bounded trace, general (non-LLM) record/replay, `ToolEntity` as a node | ✅ |
+| Subgraph | `SubgraphEntity` — embed a graph as one node (heterogeneous nested Directors, YAML `ref`, cycle detection, namespaced replay) | ✅ |
+| CI / quality | GitHub Actions (3.11/3.12): ruff + mypy (0 errors, gating) + pytest with coverage floor | ✅ |
 
 **Numbers**:
-- 299 tests (2 integration skipped without API key), 0 lint errors
+- 324 tests (2 integration skipped without API key), 0 lint errors, 0 mypy errors
+- CI gate on Python 3.11 + 3.12: ruff + mypy + pytest with an 82% coverage floor
 - 100 concurrent actors: P95 ≈ 10ms
 - 6 LLM providers (incl. ReplayProvider)
 - 3 Directors: FN / SDF / DE
-- 5 built-in Entities + custom Python + ToolRegistry (7 coding tools)
+- 7 built-in Entities: `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `ToolEntity`, `SubgraphEntity` + custom Python — plus ToolRegistry (7 coding tools)
 - 6 CLI subcommands
 
 ---
@@ -259,15 +267,15 @@ pharos/
 │   ├── llm/              LLMProvider Protocol + providers + catalog
 │   │   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
 │   │   └── catalog/      Model metadata per provider
-│   ├── directors/        FN (topo) / SDF (feedback) / DE (event-driven)
-│   ├── entities/         LLMAgent / Shell / Router / Memory + tools (coding / builtin)
+│   ├── directors/        FN (topo) / SDF (feedback) / DE (event-driven) + make_director
+│   ├── entities/         LLMAgent / Shell / Router / Memory / ToolEntity / SubgraphEntity + tools (coding / builtin)
 │   ├── observability/    Trace / Metrics / Logs / Events / TUI viewer
 │   ├── ir/               YAML graph loader (Pydantic schema)
 │   ├── runtime/          Trace persistence + replay summary
 │   ├── env.py            Auto-load ~/.pharos/.env
 │   └── cli.py            `pharos` command (run / validate / list-providers / doctor / trace / replay)
-├── graphs/               Sample workflows (9 graphs: single LLM, SDF feedback, coding agent, etc.)
-├── tests/                299 tests across 14 modules
+├── graphs/               Sample workflows (single LLM, SDF feedback, coding agent, tool node, subgraph, etc.)
+├── tests/                324 tests across ~18 modules
 ├── bench/                Performance baselines (hello_world.py)
 ├── scripts/              End-to-end verification scripts
 └── docs/                 Architecture / quickstart / cookbook + 9 phase retrospectives
