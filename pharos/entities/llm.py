@@ -101,6 +101,11 @@ class LLMAgent(Entity):
         self.config = config
         self.provider: LLMProvider | None = None
         self.model: Model | None = None
+        # Cumulative token count and cost across all fire() invocations.
+        # The Director reads these after each fire to update the run's
+        # total_tokens / total_cost.
+        self.total_tokens: int = 0
+        self.total_cost: float = 0.0
 
     async def setup(self, ctx) -> None:  # type: ignore[override]
         # Construct the provider (this may fail if API key is missing;
@@ -320,6 +325,14 @@ class LLMAgent(Entity):
                     },
                 )
             )
+
+        # Update cumulative token/cost for the Director to read.
+        self.total_tokens += total_usage.total
+        # Cost = sum of input_cost + output_cost. catalog defines
+        # these in $/million tokens; convert to dollars.
+        cost = (total_usage.input * self.model.cost.input
+                + total_usage.output * self.model.cost.output) / 1_000_000
+        self.total_cost += cost
 
     async def _stream_one_round(
         self,

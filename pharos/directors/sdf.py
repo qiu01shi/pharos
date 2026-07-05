@@ -174,8 +174,12 @@ async def _safe_fire(
         if span is not None:
             tracer.finish_span(span)
 
-    token_count = sum(len(p) for p in entity.outs.values())
-    cost = sum(t.cost_usd for p in entity.outs.values() for t in p.peek_all())
+    token_count = getattr(entity, "total_tokens", 0) or sum(
+        len(p) for p in entity.outs.values()
+    )
+    cost = getattr(entity, "total_cost", 0.0) or sum(
+        t.cost_usd for p in entity.outs.values() for t in p.peek_all()
+    )
     return (token_count, cost)
 
 

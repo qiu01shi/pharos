@@ -1,0 +1,19 @@
+name: refactor-assistant
+director: fn
+
+nodes:
+  - id: coder
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: |
+      You are a code refactoring assistant. You have tools: read, edit,
+      grep, glob, bash. Read the target file, make the requested change,
+      then verify with bash.
+    max_tokens: 1500
+    tools: coding
+    max_tool_iterations: 10
+
+edges:
+  - { src: __in__.task,  dst: coder.prompt }
+  - { src: coder.text,  dst: __out__.result }
