@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Copy link mode avoids "Failed to spawn: ruff" when uv restores a
+    # cache whose hardlink targets are missing/stale on the runner.
+    env:
+      UV_LINK_MODE: copy
     strategy:
       fail-fast: false
       matrix:
@@ -20,15 +24,27 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          # Per-version suffix so the 3.11 and 3.12 jobs never share a cache
+          # (a shared cache leaks the wrong interpreter's wheels and breaks
+          # `uv run ruff`).
+          cache-suffix: py${{ matrix.python-version }}
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --all-extras --frozen --python ${{ matrix.python-version }}
 
       - name: Lint (ruff)
         run: uv run ruff check pharos tests
 
-      - name: Test (pytest)
-        run: uv run pytest -q -m "not integration"
+      - name: Type check (mypy)
+        # Non-blocking for now: ~56 baseline errors are being burned down.
+        # Flip to a hard gate once the count reaches zero.
+        continue-on-error: true
+        run: uv run mypy pharos
+
+      - name: Test (pytest + coverage)
+        run: >-
+          uv run pytest -q -m "not integration"
+          --cov=pharos --cov-report=term-missing --cov-fail-under=78
