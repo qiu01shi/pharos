@@ -13,58 +13,58 @@ Built to answer two real pain points:
 
 ## Architecture
 
+From a YAML graph to a replayable, traced run:
+
+```mermaid
+flowchart TD
+  yaml["YAML graph: nodes + typed edges"] -->|"load_graph (pharos/ir)"| g["CompositeGraph: entities + typed ports"]
+  g --> d["Director: FN / SDF / DE"]
+
+  subgraph fire [Per fire, via safe_fire]
+    direction LR
+    perm["PermissionPolicy check"] --> setup["setup() once"] --> span["open Trace span"] --> exec["entity.fire()"]
+  end
+  d --> fire
+
+  exec --> llm["LLMAgent: provider + tool loop"]
+  exec --> tool["ToolEntity"]
+  exec --> shell["ShellEntity"]
+  exec --> sub["SubgraphEntity: nested Director"]
+  exec --> retry["RetryEntity: backoff"]
+
+  llm --> tk["Tokens (hash-chained) + Spans"]
+  tool --> tk
+  shell --> tk
+  sub --> tk
+  retry --> tk
+
+  tk -->|persist| runs["~/.pharos/runs/id.json (spans + outputs)"]
+  runs --> rr["replay --re-run (no network)"]
+  runs --> tui["trace -i (TUI tree)"]
+  runs --> otlp["trace --otlp (OTLP/JSON)"]
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        YAML graph                                │
-│   nodes: [LLMAgent, ShellEntity, Router, Memory, Python]        │
-│   edges: { src: agent.text, dst: reviewer.prompt }             │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │ load_graph (pharos/ir)
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                     CompositeGraph                              │
-│  ┌──────────┐    ┌────────────┐    ┌──────────┐                  │
-│  │ LLMAgent │ ←─ │ ToolReg    │    │ Shell    │                  │
-│  │ ports:   │    │ bash/read/ │    │ ports:   │                  │
-│  │ prompt   │    │ write/edit │    │ command  │                  │
-│  │ text     │    │ delete/    │    │ stdout   │                  │
-│  │ tool_calls    │ glob/grep  │    │ exit_code│                  │
-│  └─────┬────┘    └────────────┘    └────┬─────┘                  │
-│        │                                │                        │
-│        ↓                                ↓                        │
-│  ┌────────────────────────────────────────────────────┐         │
-│  │           Director (FN / SDF / DE)                  │         │
-│  │  • topo_layers → asyncio.gather per layer         │         │
-│  │  • permission check BEFORE setup()                 │         │
-│  │  • wrap each fire in a Trace span                  │         │
-│  │  • deliver_upstream: token flow between ports      │         │
-│  └────────────────────────────────────────────────────┘         │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ↓                     ↓                     ↓
-  ┌──────────┐          ┌──────────┐         ┌──────────┐
-  │ LLM call │          │ Tool exec│         │ Shell    │
-  │ MiniMax  │          │ parallel │         │ subprocess│
-  │ Anthropic│          │ via      │         │ capture   │
-  │ OpenAI   │          │ asyncio. │         │ stdout    │
-  │ GLM      │          │ gather   │         │ + stderr  │
-  │ DeepSeek │          │          │         │           │
-  └────┬─────┘          └────┬─────┘         └────┬─────┘
-       │                     │                   │
-       ↓                     ↓                   ↓
-  ┌──────────────────────────────────────────────────────┐
-  │  Token(hash) + Trace(span with events + attrs)        │
-  │  → ~/.pharos/runs/<uuid>.json  (cross-process)         │
-  └──────────────────────────────────────────────────────┘
-       │                     │                   │
-       ↓                     ↓                   ↓
-  ┌──────────────────────────────────────────────────────┐
-  │             Replay + ReplayProvider                   │
-  │  • replay <id>           — inspect recorded outputs   │
-  │  • replay --re-run       — re-execute, no network     │
-  │  • trace --interactive   — TUI tree view             │
-  └──────────────────────────────────────────────────────┘
+
+Every node fires through one shared `safe_fire` path, so RBAC, tracing, and
+record/replay apply uniformly regardless of the Director:
+
+```mermaid
+sequenceDiagram
+  participant D as Director
+  participant SF as safe_fire
+  participant PP as PermissionPolicy
+  participant E as Entity
+  participant P as Provider/Tool
+  participant R as Recorder/Tracer
+  D->>SF: fire(entity, fire_ctx, run_ctx)
+  SF->>PP: check(required_permissions)
+  SF->>E: setup() first time only
+  SF->>R: open span
+  SF->>E: fire(ctx)
+  E->>P: call (LLM / tool / shell)
+  P-->>E: output tokens
+  E-->>SF: emit on output ports
+  SF->>R: record outputs + close span
+  SF-->>D: metrics (tokens, cost)
 ```
 
 ### Layered design
@@ -73,15 +73,15 @@ Built to answer two real pain points:
 pharos/
 ├── core/             Token / Port / Entity / Graph / PermissionPolicy (typed dataflow primitives)
 ├── directors/        FN (topo) / SDF (feedback) / DE (event-driven) + shared safe_fire
-├── entities/         LLMAgent / Shell / Router / Memory / Python / ToolEntity / SubgraphEntity / ToolRegistry
-├── llm/              LLMProvider Protocol + 5 providers + ReplayProvider
+├── entities/         LLMAgent / Shell / Router / Memory / Python / ToolEntity / SubgraphEntity / RetryEntity / ToolRegistry
+├── llm/              LLMProvider Protocol + 6 providers + ReplayProvider
 │   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
 │   └── catalog/      Model metadata per provider (cost, context window)
-├── observability/    Trace (Span + Events) / Metrics / Logs / Events / TUI viewer
+├── observability/    Trace (Span + Events) / Metrics / Logs / OTLP export / TUI viewer
 ├── ir/               YAML graph loader (Pydantic schema)
 ├── runtime/          Trace persistence (~/.pharos/runs/) + replay inspection
 ├── env.py            Auto-load ~/.pharos/.env (shell env wins)
-└── cli.py            6 subcommands: run / validate / list-providers / doctor / trace / replay
+└── cli.py            6 subcommands: run / validate / list-providers / doctor / trace (--otlp) / replay
 ```
 
 ---
@@ -90,9 +90,9 @@ pharos/
 
 ### What pharos does
 
-- ✅ **6 LLM providers** — OpenAI, Anthropic, DeepSeek, GLM, MiniMax (Anthropic-compatible), Faux
+- ✅ **6 LLM providers** — OpenAI, Anthropic, DeepSeek, GLM, MiniMax (Anthropic-compatible), Faux (+ ReplayProvider)
 - ✅ **3 Directors** — FN (one-shot topological), SDF (feedback loop, K-of-N stable convergence), DE (event-driven)
-- ✅ **5 Entities** — `LLMAgent`, `ShellEntity`, `Router`, `Memory`, plus custom Python classes via YAML
+- ✅ **8 built-in Entities** — `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `ToolEntity`, `SubgraphEntity`, `RetryEntity`, plus custom Python classes via YAML
 - ✅ **7 Coding tools** — `bash`, `read`, `write`, `edit` (anchor-validated), `delete`, `glob`, `grep`
 - ✅ **Tool calling loop** — LLM emits tool calls, pharos executes them, feeds results back, loops up to N turns
 - ✅ **Parallel tool execution** — multiple tool calls in one round run via `asyncio.gather`
@@ -248,15 +248,37 @@ The dataflow runtime has near-zero overhead — 90 concurrent entities finish in
 | Arch pass | Unified `safe_fire`/`PermissionPolicy`, bounded trace, general (non-LLM) record/replay, `ToolEntity` as a node | ✅ |
 | Subgraph | `SubgraphEntity` — embed a graph as one node (heterogeneous nested Directors, YAML `ref`, cycle detection, namespaced replay) | ✅ |
 | CI / quality | GitHub Actions (3.11/3.12): ruff + mypy (0 errors, gating) + pytest with coverage floor | ✅ |
+| Resilience / obs | `RetryEntity` (`retry:` block) + OTLP/JSON trace export (`trace --otlp`, `post_otlp`) | ✅ |
+| Packaging | v0.2.0, hatchling wheel + sdist, trusted-publishing workflow (TestPyPI / PyPI) | ✅ |
 
 **Numbers**:
-- 324 tests (2 integration skipped without API key), 0 lint errors, 0 mypy errors
-- CI gate on Python 3.11 + 3.12: ruff + mypy + pytest with an 82% coverage floor
+- 345 tests (2 integration skipped without API key), 0 lint errors, 0 mypy errors
+- CI gate on Python 3.11 + 3.12: ruff + mypy + pytest, coverage gate at 78% (actual ~82%)
 - 100 concurrent actors: P95 ≈ 10ms
-- 6 LLM providers (incl. ReplayProvider)
+- 6 LLM providers + ReplayProvider
 - 3 Directors: FN / SDF / DE
 - 8 built-in Entities: `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `ToolEntity`, `SubgraphEntity`, `RetryEntity` + custom Python — plus ToolRegistry (7 coding tools)
 - 6 CLI subcommands
+
+---
+
+## Roadmap
+
+Researched next steps, grouped by effort. Contributions welcome.
+
+**Near-term**
+
+- **Persistent SQLite trace backend** — [pharos/observability/backend/__init__.py](pharos/observability/backend/__init__.py) currently ships only an in-memory + console backend (SQLite is a stub) and the `aiosqlite` dependency is unused. A SQLite backend enables cross-session trace queries beyond per-run JSON files.
+- **Human-in-the-loop `HumanEntity`** — named in [pharos/entities/__init__.py](pharos/entities/__init__.py) but not implemented. Pause a run for approval/input, gated by RBAC and captured in the trace.
+- **Run-level cost/token budgets** — metrics are already aggregated in [pharos/directors/base.py](pharos/directors/base.py) (`collect_metrics`); add a budget that aborts a run when exceeded.
+- **Real-API integration tests for tool-calling** — OpenAI and Anthropic already serialize tools (`_convert_tools` in each provider); add coverage behind the existing `integration` pytest marker.
+
+**Later**
+
+- **Structured LLM output** — ports are typed, but LLM text is not schema-validated. Validate JSON responses against a declared schema at the port boundary.
+- **Vision / multimodal `read`** — `TypedValue` already allows an `image` type; wire an image-capable read tool and provider path.
+- **More Directors (PN / CT)** — the [pharos/ir/__init__.py](pharos/ir/__init__.py) `DirectorName` comment notes these were planned.
+- **Checkpoint / resume for long runs** — reuse the record/replay infrastructure to persist and restore mid-run state for long SDF/DE loops.
 
 ---
 
@@ -270,14 +292,14 @@ pharos/
 │   │   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
 │   │   └── catalog/      Model metadata per provider
 │   ├── directors/        FN (topo) / SDF (feedback) / DE (event-driven) + make_director
-│   ├── entities/         LLMAgent / Shell / Router / Memory / ToolEntity / SubgraphEntity + tools (coding / builtin)
-│   ├── observability/    Trace / Metrics / Logs / Events / TUI viewer
+│   ├── entities/         LLMAgent / Shell / Router / Memory / ToolEntity / SubgraphEntity / RetryEntity + tools (coding / builtin)
+│   ├── observability/    Trace / Metrics / Logs / OTLP export / TUI viewer
 │   ├── ir/               YAML graph loader (Pydantic schema)
 │   ├── runtime/          Trace persistence + replay summary
 │   ├── env.py            Auto-load ~/.pharos/.env
 │   └── cli.py            `pharos` command (run / validate / list-providers / doctor / trace / replay)
 ├── graphs/               Sample workflows (single LLM, SDF feedback, coding agent, tool node, subgraph, etc.)
-├── tests/                324 tests across ~18 modules
+├── tests/                345 tests across ~20 modules
 ├── bench/                Performance baselines (hello_world.py)
 ├── scripts/              End-to-end verification scripts
 └── docs/                 Architecture / quickstart / cookbook + 9 phase retrospectives
