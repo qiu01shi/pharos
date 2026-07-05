@@ -1,0 +1,20 @@
+# Composability: a graph embedding another graph as one node.
+#
+# The parent runs FN (one-shot topological); the embedded `review` node is a
+# whole subgraph that runs its own SDF feedback loop (see
+# _reviewer_subgraph.yaml). This heterogeneous nested scheduling — FN parent
+# driving an SDF child — is what the dataflow model buys you.
+#
+# Run:
+#   uv run pharos run graphs/08_subgraph.yaml --input "fix the off-by-one bug"
+name: subgraph-demo
+director: fn
+nodes:
+  - id: review
+    type: subgraph
+    ref: _reviewer_subgraph.yaml   # resolved relative to this file
+    inputs: { prompt: prompt }
+    outputs: { verdict: verdict }
+edges:
+  - { src: __in__.prompt,   dst: review.prompt }
+  - { src: review.verdict,  dst: __out__.result }

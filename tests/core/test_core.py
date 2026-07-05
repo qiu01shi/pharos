@@ -283,24 +283,47 @@ class TestGraph:
         errors = g.validate()
         assert any("cycle" in e for e in errors)
 
-    def test_subgraph_with_exports(self):
-        g = CompositeGraph(name="outer")
-        inner = CompositeGraph(name="inner")
-        # populate inner with a node that has a port to export
+    async def test_subgraph_executes_and_exports(self):
+        # A subgraph runs as a composite node: seed parent __in__, the child
+        # runs, and its __out__ flows back out. Also asserts exports are
+        # recorded for introspection.
         from pharos.core.entity import Entity, entity
-        from pharos.core.port import OutputPort
+        from pharos.core.port import InputPort, OutputPort
+        from pharos.directors.base import RunContext
+        from pharos.directors.fn import FNDirector
 
         @entity
         class Stub(Entity):
+            ins = {"x": InputPort(name="x", accepted_types=["text"])}
             outs = {"y": OutputPort(name="y", accepted_types=["text"])}
 
             async def fire(self, ctx):  # type: ignore[override]
-                return
+                for t in self.ins["x"].consume():
+                    self.outs["y"].emit(
+                        TypedValue(type="text", payload=t.value.payload + "!")
+                    )
 
-        inner.add_entity("stub", Stub())
-        # exports are public_name -> "internal_node.internal_port"
-        g.add_subgraph("inner", inner, exports={"y": "stub.y"})
+        inner = CompositeGraph(name="inner")
+        inner.add_entity("stub", Stub("stub"))
+        inner.connect("__in__.x", "stub.x")
+        inner.connect("stub.y", "__out__.y")
+
+        g = CompositeGraph(name="outer")
+        g.add_subgraph("inner", inner)
+        # exports records the subgraph's public output ports.
         assert "y" in g.exports
+        g.connect("__in__.msg", "inner.x")
+        g.connect("inner.y", "__out__.done")
+
+        for e in g.edges:
+            if e.src_node == "__in__" and e.src_port == "msg":
+                g.node(e.dst_node).instance.ins[e.dst_port].emit(
+                    TypedValue(type="text", payload="hi")
+                )
+        r = await FNDirector().run(g, RunContext(run_id="t"))
+        assert r.converged is True
+        out = getattr(g, "collected", {}).get("__out__", {}).get("done", [])
+        assert [t.value.payload for t in out] == ["hi!"]
 
 
 class TestTypeSystem:

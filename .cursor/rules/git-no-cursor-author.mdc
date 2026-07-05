@@ -1,0 +1,10 @@
+---
+description: Git commits in pharos use qiushijun only — no Cursor author or co-author
+alwaysApply: true
+---
+
+# Git commit author — pharos
+
+- Author / committer: **qiushijun** `<2842368912@qq.com>` (or current repo `user.name` / `user.email`).
+- Never add `Co-authored-by: Cursor` or any Cursor-related attribution.
+- After each commit, run `git log -1 --format=full` and confirm no Cursor strings appear.

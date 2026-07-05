@@ -1,0 +1,25 @@
+# Reusable review subgraph — embedded by 08_subgraph.yaml.
+#
+# This child graph runs its own SDF (feedback) Director: coder drafts, the
+# reviewer reads it, and the loop settles via K-of-N token-hash convergence.
+# Because it is a separate file, it can be referenced and reused by any
+# parent graph via `type: subgraph`.
+name: reviewer-subgraph
+director: sdf
+nodes:
+  - id: coder
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "You draft a fix."
+    max_tokens: 80
+  - id: reviewer
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "You review the draft and give a verdict."
+    max_tokens: 80
+edges:
+  - { src: __in__.prompt, dst: coder.prompt }
+  - { src: coder.text,    dst: reviewer.prompt }
+  - { src: reviewer.text, dst: __out__.verdict }

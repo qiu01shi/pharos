@@ -13,7 +13,10 @@ from pharos.llm.types import Context, UserMessage
 
 
 def _make_provider() -> MiniMaxProvider:
-    return MiniMaxProvider()
+    # Pass a dummy key so unit tests run without MINIMAX_CN_API_KEY.
+    # Streaming tests replace `_client` via `_attach_mock`, so no real
+    # network / key is ever used.
+    return MiniMaxProvider(api_key="test-key-not-real")
 
 
 def _attach_mock(p: MiniMaxProvider, chunks: list[str]) -> None:
