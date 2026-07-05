@@ -1,0 +1,40 @@
+name: fix-buggy-calculator
+director: sdf
+
+# SDF 反馈循环场景:
+#  coder (LLM) → patch → reviewer (LLM) → verdict
+#                              ↑                        ↓
+#                              └─────── if rejected ─────┘
+#
+# 这里把 "coder" / "reviewer" 用 faux 模拟,展示 SDF Director
+# 在多轮反馈下的收敛行为。SDF 每轮 fire 全部 entity,reviewer
+# 的 verdict 通过 self-loop 反馈到 coder 决定下一轮要不要改。
+
+nodes:
+  - id: coder
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "You fix bugs in calculator.py."
+    max_tokens: 200
+  - id: reviewer
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "You review the fix."
+    max_tokens: 100
+  - id: shell_test
+    type: shell
+    timeout: 10
+
+edges:
+  # Input → coder
+  - { src: __in__.task,    dst: coder.prompt }
+  # coder → reviewer (the "fix")
+  - { src: coder.text,     dst: reviewer.prompt }
+  # Reviewer → shell_test (run the test)
+  - { src: reviewer.text,  dst: shell_test.command }
+  # shell_test → reviewer (stdout back to reviewer as text)
+  - { src: shell_test.stdout, dst: reviewer.prompt }
+  # Final output
+  - { src: reviewer.text,  dst: __out__.final }

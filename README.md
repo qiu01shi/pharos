@@ -82,19 +82,23 @@ pharos run hello.yaml --input "hi there"
 
 ## Current status
 
-**P0 done, P1 in progress.**
+**P0–P2 done.**
 
 | Phase | What | Status |
 | --- | --- | --- |
-| **P0** | Core abstractions, FN Director, FauxProvider, trace, perf baseline | ✅ done |
-| **P1** | OpenAI + GLM providers, YAML IR, CLI, real bug-fix workflow | 🚧 active |
+| **P0** | Core abstractions, FN Director, FauxProvider, trace, perf baseline | ✅ |
+| **P1** | OpenAI + GLM providers, YAML IR, CLI, trace persistence | ✅ |
+| **P2** | Anthropic + DeepSeek providers, Router + Memory entities, SDF Director (feedback loops) | ✅ |
+| **P3** | DE / PN / CT directors, real Replay, TUI viewer | pending |
 
-**P0 numbers** (in `docs/P0-COMPLETE.md`):
-- 151 tests, 0 lint errors
-- 100 concurrent actors: P95 = 14ms (target 2000ms)
-- ~4000 lines of code, ~50% tests
+**Numbers**:
+- 187 tests, 0 lint errors
+- 100 concurrent actors: P95 ≈ 15ms (target 2000ms)
+- 5 LLM providers: faux / glm / openai / deepseek / anthropic
+- 2 Directors: FN / SDF
+- 4 Entities: LLMAgent / ShellEntity / Router / Memory
 
----
+See [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md), [P1](docs/P1-COMPLETE.md), [P2](docs/P2-COMPLETE.md).
 
 ## Project layout
 

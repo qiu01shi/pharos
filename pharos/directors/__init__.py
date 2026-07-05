@@ -9,6 +9,7 @@ from pharos.directors.base import (
     topo_layers,
 )
 from pharos.directors.fn import FNDirector
+from pharos.directors.sdf import SDFDirector
 
 __all__ = [
     "Director",
@@ -16,6 +17,7 @@ __all__ = [
     "FireContext",
     "RunContext",
     "RunResult",
+    "SDFDirector",
     "deliver_upstream",
     "topo_layers",
 ]

@@ -18,6 +18,7 @@ from pharos.core.graph import CompositeGraph
 from pharos.core.token import TypedValue
 from pharos.directors.base import RunContext
 from pharos.directors.fn import FNDirector
+from pharos.directors.sdf import SDFDirector
 from pharos.ir import load_graph
 from pharos.observability.backend.console import ConsoleTraceBackend
 from pharos.observability.trace import InMemoryTracer
@@ -57,15 +58,24 @@ def run(
     input: str = typer.Option("", "--input", "-i", help="Initial prompt text"),
     json_out: bool = typer.Option(False, "--json", help="Output JSON"),
     trace: bool = typer.Option(False, "--trace", help="Show trace after run"),
+    max_iters: int = typer.Option(
+        20, "--max-iters", help="Max iterations (SDF only)"
+    ),
+    converge_k: int = typer.Option(
+        2, "--converge-k", help="Convergence K (SDF only)"
+    ),
 ) -> None:
     """Load a graph and run it once with --input as the initial prompt."""
-    g, _raw = load_graph(graph)
+    g, raw = load_graph(graph)
     _seed_input(g, input)
-    result, _backend = asyncio.run(_run_with_trace(g, trace))
+    director_name = raw.get("director", "fn")
+    result, _backend = asyncio.run(
+        _run_with_trace(g, director_name, trace, max_iters, converge_k)
+    )
     if json_out:
         typer.echo(json.dumps(_result_to_dict(result), indent=2, default=str))
     else:
-        _print_summary(g, result)
+        _print_summary(g, result, director_name)
 
 
 @app.command()
@@ -155,7 +165,11 @@ def _seed_input(g: CompositeGraph, text: str) -> None:
 
 
 async def _run_with_trace(
-    g: CompositeGraph, want_trace: bool
+    g: CompositeGraph,
+    director_name: str,
+    want_trace: bool,
+    max_iters: int = 20,
+    converge_k: int = 2,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
     from pharos.runtime import record_run
 
@@ -163,7 +177,12 @@ async def _run_with_trace(
     backend = ConsoleTraceBackend() if want_trace else None
     ctx = RunContext(run_id=str(uuid.uuid4()))
     ctx.tracer = tracer  # type: ignore[attr-defined]
-    d = FNDirector()
+
+    if director_name == "sdf":
+        d = SDFDirector(max_iterations=max_iters, convergence_k=converge_k)
+    else:
+        d = FNDirector()
+
     result = await d.run(g, ctx)
     if backend is not None:
         for s in tracer.spans:
@@ -228,9 +247,10 @@ def trace(
     console.print(backend.render())
 
 
-def _print_summary(g: CompositeGraph, result: Any) -> None:
+def _print_summary(g: CompositeGraph, result: Any, director_name: str = "fn") -> None:
     console.print(
         f"\n[bold]Run:[/bold] {g.name}  "
+        f"[cyan]director={director_name}[/cyan]  "
         f"[green]converged={result.converged}[/green]  "
         f"iterations={result.iterations}  "
         f"tokens={result.tokens_emitted}  "

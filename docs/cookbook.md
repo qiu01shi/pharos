@@ -98,46 +98,6 @@ partial response before it finishes:
 
 ## 4. Multi-model voting (3 reviewers)
 
-```yaml
-name: code-review
-director: fn
-nodes:
-  - id: reviewer_a
-    type: llm
-    provider: glm
-    model: glm-4.5-air
-    system: "You focus on security issues."
-  - id: reviewer_b
-    type: llm
-    provider: glm
-    model: glm-4.5
-    system: "You focus on performance."
-  - id: reviewer_c
-    type: llm
-    provider: openai
-    model: gpt-4o-mini
-    system: "You focus on readability."
-  - id: aggregator
-    type: llm
-    provider: glm
-    model: glm-4.5-air
-    system: "Aggregate three review reports into a final list."
-edges:
-  - { src: __in__.diff,           dst: reviewer_a.prompt }
-  - { src: __in__.diff,           dst: reviewer_b.prompt }
-  - { src: __in__.diff,           dst: reviewer_c.prompt }
-  - { src: reviewer_a.text,       dst: aggregator.prompt }
-  - { src: reviewer_b.text,       dst: aggregator.prompt }
-  - { src: reviewer_c.text,       dst: aggregator.prompt }
-  - { src: aggregator.text,       dst: __out__.review  }
-```
-
-All three reviewers run in **parallel** (same topological layer).
-Total wall time ≈ max(reviewer_a, reviewer_b, reviewer_c), not the
-sum.
-
----
-
 ## 5. Custom Entity
 
 ```python
@@ -223,7 +183,7 @@ happened. The first place to check: is your LLM config in
 
 ## Coming soon
 
-- **Reuse with SDF Director** — feedback loops where a `reviewer`
-  rejects a `coder`'s output and forces another iteration.
-- **Replay** — re-execute a recorded run byte-for-byte (no LLM call).
-- **TUI viewer** — browse traces interactively.
+- **Custom Python entities from YAML** — `type: python:module:Class` resolution.
+- **Real Replay** — re-execute a recorded run with cached LLM outputs (no network).
+- **TUI viewer** — browse traces interactively in the terminal.
+- **DE / PN / CT directors** — stream / message-bus / external-event.

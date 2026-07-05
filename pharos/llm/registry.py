@@ -43,6 +43,8 @@ def create_provider(name: str, **kwargs: object) -> LLMProvider:
 
 def _register_builtins() -> None:
     # Imports here to avoid circular dependencies
+    from pharos.llm.providers.anthropic import AnthropicProvider
+    from pharos.llm.providers.deepseek import DeepSeekProvider
     from pharos.llm.providers.faux import FauxProvider
     from pharos.llm.providers.glm import GLMProvider
     from pharos.llm.providers.openai import OpenAIProvider
@@ -50,6 +52,8 @@ def _register_builtins() -> None:
     register_provider("faux", FauxProvider)
     register_provider("openai", OpenAIProvider)
     register_provider("glm", GLMProvider)
+    register_provider("deepseek", DeepSeekProvider)
+    register_provider("anthropic", AnthropicProvider)
 
 
 _register_builtins()

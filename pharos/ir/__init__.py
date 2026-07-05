@@ -38,7 +38,7 @@ from pharos.llm.providers.faux import FauxConfig, FauxProvider  # noqa: F401
 from pharos.llm.providers.glm import GLMProvider
 from pharos.llm.providers.openai import OpenAIProvider
 
-DirectorName = Literal["fn"]  # DE/PN/SDF/CT added in later phases
+DirectorName = Literal["fn", "sdf"]  # DE/PN/CT added in later phases
 
 
 # ---------- node specs ----------
@@ -158,7 +158,12 @@ def load_graph(
 
     errors = g.validate()
     if errors:
-        raise ValueError(f"graph validation failed: {errors}")
+        # Allow cycles if the director supports them (SDF).
+        # The Director itself decides whether to honor feedback.
+        director = raw.get("director", "fn") if isinstance(raw, dict) else "fn"
+        only_cycle = all("cycle" in e for e in errors)
+        if not (only_cycle and director in ("sdf",)):
+            raise ValueError(f"graph validation failed: {errors}")
 
     return g, raw
 
