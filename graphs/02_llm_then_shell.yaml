@@ -1,0 +1,17 @@
+name: llm-then-shell
+director: fn
+nodes:
+  - id: agent
+    type: llm
+    provider: glm
+    model: glm-4.5-air
+    system: "You write short shell one-liners. Reply with ONLY the command, no commentary."
+    max_tokens: 100
+  - id: runner
+    type: shell
+    timeout: 30
+edges:
+  - { src: __in__.task,    dst: agent.prompt }
+  - { src: agent.text,     dst: runner.command }
+  - { src: runner.stdout,  dst: __out__.output }
+  - { src: runner.exit_code, dst: __out__.exit_code }

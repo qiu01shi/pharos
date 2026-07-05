@@ -1,0 +1,12 @@
+name: hello-llm
+director: fn
+nodes:
+  - id: agent
+    type: llm
+    provider: glm
+    model: glm-4.5-air
+    system: "You are brief and friendly. Reply in one short sentence."
+    max_tokens: 200
+edges:
+  - { src: __in__.prompt, dst: agent.prompt }
+  - { src: agent.text, dst: __out__.response }
