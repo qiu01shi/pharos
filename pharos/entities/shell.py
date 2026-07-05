@@ -26,7 +26,14 @@ from pharos.core.token import TypedValue
 
 @entity
 class ShellEntity(Entity):
-    """Run a shell command, capture stdout/stderr + exit code."""
+    """Run a shell command, capture stdout/stderr + exit code.
+
+    Permission: declares `{"shell:execute"}` — loaders/Directors
+    refuse to run this entity unless the run context has been
+    granted that permission.
+    """
+
+    required_permissions = {"shell:execute"}
 
     ins = {
         "command": InputPort(name="command", accepted_types=["text"]),

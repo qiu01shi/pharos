@@ -34,11 +34,25 @@ class RunContext:
 
     Concrete runs may add fields (tracer, config); this base carries
     just what every Director needs.
+
+    Permissions:
+        `granted_permissions` is a set of permission strings the run
+        is authorized to use. The Director checks each Entity's
+        `required_permissions` against this set during setup(); if
+        any required permission is missing, the run fails with
+        PermissionError before any entity is fired.
+
+        An empty set means "no permissions granted" — entities
+        requiring any permission will be denied. A run that
+        intends to run without constraints should pass
+        `granted_permissions=set()` (the default) and ensure no
+        entity requires permissions.
     """
 
     run_id: str
     started_at: float = field(default_factory=time.time)
     config: dict[str, Any] = field(default_factory=dict)
+    granted_permissions: set[str] = field(default_factory=set)
 
 
 @dataclass

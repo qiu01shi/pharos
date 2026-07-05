@@ -23,7 +23,10 @@ class TestShellEntity:
             TypedValue(type="text", payload="echo hello-pharos")
         )
         d = FNDirector()
-        await d.run(g, RunContext(run_id="t"))
+        await d.run(g, RunContext(
+            run_id="t",
+            granted_permissions={"shell:execute"},
+        ))
         stdout = [t.value.payload for t in shell.outs["stdout"].peek_all()]
         exit_code = [t.value.payload for t in shell.outs["exit_code"].peek_all()]
         assert stdout == ["hello-pharos\n"]
@@ -37,7 +40,10 @@ class TestShellEntity:
             TypedValue(type="text", payload="exit 7")
         )
         d = FNDirector()
-        await d.run(g, RunContext(run_id="t"))
+        await d.run(g, RunContext(
+            run_id="t",
+            granted_permissions={"shell:execute"},
+        ))
         exit_code = [t.value.payload for t in shell.outs["exit_code"].peek_all()]
         assert exit_code == [7]
 
@@ -49,7 +55,10 @@ class TestShellEntity:
             TypedValue(type="text", payload="echo bad >&2")
         )
         d = FNDirector()
-        await d.run(g, RunContext(run_id="t"))
+        await d.run(g, RunContext(
+            run_id="t",
+            granted_permissions={"shell:execute"},
+        ))
         stderr = [t.value.payload for t in shell.outs["stderr"].peek_all()]
         assert any("bad" in s for s in stderr)
 

@@ -41,11 +41,19 @@ class Entity(ABC):
       - Override _declare_ports() in __init__ (dynamic declaration)
 
     Then implement `async def fire(ctx)`.
+
+    Permissions:
+      Subclasses MAY declare `required_permissions` as a class
+      attribute — a set of permission strings the entity needs to
+      run. Examples: `{"shell:execute"}`, `{"fs:read"}`. The Director
+      checks these against `RunContext.granted_permissions` before
+      calling `setup()`; missing permissions raise PermissionError.
     """
 
     spec: ClassVar[EntitySpec]
     ins: ClassVar[dict[str, InputPort]]
     outs: ClassVar[dict[str, OutputPort]]
+    required_permissions: ClassVar[set[str]] = set()
     node_id: str
 
     def __init__(self, node_id: str | None = None) -> None:

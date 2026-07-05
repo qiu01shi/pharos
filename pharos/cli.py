@@ -66,6 +66,16 @@ def run(
             "Seeds `__in__.<port>` for any port not in --input."
         ),
     ),
+    grant: list[str] = typer.Option(
+        [],
+        "--grant",
+        help=(
+            "Grant a permission to this run (repeatable). "
+            "Entities declaring `required_permissions` will only run "
+            "if every required permission has been granted. "
+            "E.g. --grant shell:execute"
+        ),
+    ),
     var: list[str] = typer.Option(
         [],
         "--var",
@@ -101,7 +111,14 @@ def run(
     _seed_inputs(g, seed_map)
     director_name = raw.get("director", "fn")
     result, _backend = asyncio.run(
-        _run_with_trace(g, director_name, trace, max_iters, converge_k)
+        _run_with_trace(
+            g,
+            director_name,
+            trace,
+            max_iters,
+            converge_k,
+            granted_permissions=set(grant),
+        )
     )
     if json_out:
         typer.echo(json.dumps(_result_to_dict(result), indent=2, default=str))
@@ -256,12 +273,16 @@ async def _run_with_trace(
     want_trace: bool,
     max_iters: int = 20,
     converge_k: int = 2,
+    granted_permissions: set[str] | None = None,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
     from pharos.runtime import record_run
 
     tracer = InMemoryTracer()
     backend = ConsoleTraceBackend() if want_trace else None
-    ctx = RunContext(run_id=str(uuid.uuid4()))
+    ctx = RunContext(
+        run_id=str(uuid.uuid4()),
+        granted_permissions=granted_permissions or set(),
+    )
     ctx.tracer = tracer  # type: ignore[attr-defined]
 
     if director_name == "sdf":

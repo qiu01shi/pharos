@@ -109,8 +109,25 @@ async def _safe_fire(
     Captures exceptions and re-raises so the gather() can fail the run.
     Every fire is wrapped in a span (if a tracer is registered on the
     run context) so post-hoc analysis and replay have a record.
+
+    Permission check:
+        Before setup(), we compare the entity's `required_permissions`
+        against the run context's `granted_permissions`. If any
+        required permission is missing, raise PermissionError
+        immediately — better than failing partway through a run.
     """
     from pharos.observability.trace import current_span
+
+    # Permission check (BEFORE setup)
+    required = getattr(entity, "required_permissions", set()) or set()
+    granted = getattr(run_ctx, "granted_permissions", set()) or set()
+    missing = required - granted
+    if missing:
+        raise PermissionError(
+            f"entity {entity.node_id!r} ({type(entity).__name__}) "
+            f"requires {sorted(missing)} but run only grants "
+            f"{sorted(granted) if granted else 'no permissions'}"
+        )
 
     if not getattr(entity, "_initialized", False):
         await entity.setup(run_ctx)
