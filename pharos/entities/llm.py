@@ -12,6 +12,7 @@ Behavior:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,8 @@ from pharos.llm.types import (
     Usage,
     UserMessage,
 )
+from pharos.observability.trace import SpanEvent as _SpanEvent
+from pharos.observability.trace import current_span as _current_span_fn
 
 
 @dataclass
@@ -147,9 +150,34 @@ class LLMAgent(Entity):
         accumulated_thinking = ""
         tool_calls: list[ToolCall] = []
         usage = Usage()
+        # Record events onto the active span (if any) for replay.
+        span = _current_span_fn()
 
         # Stream the response
         async for ev in self.provider.stream(self.model, context, options):
+            # Forward event to the trace span for replay support.
+            if span is not None:
+                span.events.append(
+                    _SpanEvent(
+                        name=ev.type,
+                        ts=time.time(),
+                        attributes={
+                            "delta": ev.delta,
+                            "content_index": ev.content_index,
+                            "tool_call": (
+                                ev.tool_call.model_dump()
+                                if ev.tool_call
+                                else None
+                            ),
+                            "message": (
+                                ev.message.model_dump()
+                                if ev.message
+                                else None
+                            ),
+                            "error": ev.error,
+                        },
+                    )
+                )
             if ev.type == "text_delta" and ev.delta:
                 accumulated += ev.delta
                 # Live-stream: emit a partial token to `draft` on every delta

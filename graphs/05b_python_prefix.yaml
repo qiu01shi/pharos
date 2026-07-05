@@ -1,0 +1,11 @@
+name: prefix-adder-demo
+director: fn
+nodes:
+  - id: pa
+    type: python
+    class: "tests._user_entities:PrefixAdder"
+    params:
+      prefix: ">>> "
+edges:
+  - { src: __in__.msg,   dst: pa.in }
+  - { src: pa.out,       dst: __out__.result }

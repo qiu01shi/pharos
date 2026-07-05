@@ -1,0 +1,9 @@
+name: word-counter-demo
+director: fn
+nodes:
+  - id: wc
+    type: python
+    class: "tests._user_entities:WordCounter"
+edges:
+  - { src: __in__.text,  dst: wc.text }
+  - { src: wc.count,    dst: __out__.count }

@@ -247,6 +247,55 @@ def trace(
     console.print(backend.render())
 
 
+@app.command()
+def replay(
+    run_id: str = typer.Argument(..., help="Run id to replay"),
+    json_out: bool = typer.Option(False, "--json", help="Output JSON"),
+) -> None:
+    """Show every entity's emitted text from a recorded run.
+
+    This is a deterministic replay inspection — it does NOT re-execute
+    the graph; it extracts the final text each entity produced and
+    prints it in step order.
+    """
+    from pharos.runtime import replay_run_summary
+
+    summary = replay_run_summary(run_id)
+    if summary["entity_count"] == 0:
+        console.print(f"[red]No run with id {run_id!r}[/red]")
+        console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
+        raise typer.Exit(code=1)
+
+    if json_out:
+        typer.echo(json.dumps(summary, indent=2, default=str))
+        return
+
+    console.print(
+        f"\n[bold]Replay:[/bold] {summary['run_id']}  "
+        f"[cyan]director={summary['director'] or '?'}[/cyan]  "
+        f"entities={summary['entity_count']}  "
+        f"total={summary['total_duration_ms']:.1f} ms"
+    )
+    table = Table(title="Per-entity outputs (recorded)")
+    table.add_column("#", justify="right")
+    table.add_column("node", style="cyan")
+    table.add_column("step_id", style="dim")
+    table.add_column("duration", justify="right")
+    table.add_column("output_text", style="green")
+    for i, ent in enumerate(summary["entities"], 1):
+        out = ent["output_text"]
+        if len(out) > 200:
+            out = out[:197] + "..."
+        table.add_row(
+            str(i),
+            ent["node_id"],
+            ent["step_id"][-12:] if ent["step_id"] else "",
+            f"{ent['duration_ms']:.1f} ms",
+            out or "(no text)",
+        )
+    console.print(table)
+
+
 def _print_summary(g: CompositeGraph, result: Any, director_name: str = "fn") -> None:
     console.print(
         f"\n[bold]Run:[/bold] {g.name}  "
