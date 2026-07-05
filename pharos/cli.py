@@ -274,16 +274,21 @@ async def _run_with_trace(
     max_iters: int = 20,
     converge_k: int = 2,
     granted_permissions: set[str] | None = None,
+    replayer: Any = None,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
-    from pharos.runtime import record_run
+    from pharos.runtime import RunRecorder, record_run
 
     tracer = InMemoryTracer()
     backend = ConsoleTraceBackend() if want_trace else None
+    # Record entity outputs only for live runs (not when replaying).
+    recorder = RunRecorder() if replayer is None else None
     ctx = RunContext(
         run_id=str(uuid.uuid4()),
         granted_permissions=granted_permissions or set(),
+        tracer=tracer,
+        recorder=recorder,
+        replayer=replayer,
     )
-    ctx.tracer = tracer  # type: ignore[attr-defined]
 
     if director_name == "sdf":
         d = SDFDirector(max_iterations=max_iters, convergence_k=converge_k)
@@ -297,7 +302,12 @@ async def _run_with_trace(
         for s in tracer.spans:
             backend.write(s)
     # Always record (P2: persisted; P1: in-memory)
-    record_run(ctx.run_id, tracer.spans)
+    record_run(
+        ctx.run_id,
+        tracer.spans,
+        outputs=recorder.to_dict() if recorder is not None else None,
+        director=director_name,
+    )
     return result, backend
 
 
@@ -447,32 +457,49 @@ async def _replay_rerun(
     run_id: str,
     seed_input: str = "",
 ) -> None:
-    """Re-execute a graph using recorded LLM outputs as the cache.
+    """Re-execute a graph from a recorded run with zero network calls.
 
-    Builds the graph normally, then walks nodes, swapping any
-    LLMAgent's provider for a ReplayProvider keyed by node_id.
+    Preferred path (general): if the run recorded an entity-output cache,
+    attach a `RunReplayer` so EVERY entity (LLM / shell / python / tool)
+    replays its recorded outputs — no entity actually executes, so shell
+    commands and file writes are not re-run.
+
+    Fallback (legacy runs): if there is no output cache, swap each
+    LLMAgent's provider for a `ReplayProvider` and re-execute (only LLM
+    calls avoid the network; other entities run for real).
     """
+    from pharos.runtime import RunReplayer, get_run_director
+
+    replayer = RunReplayer.load(run_id)
+    if replayer is not None:
+        g, _raw = load_graph(graph)
+        _seed_input(g, seed_input or "(replay)")
+        director_name = get_run_director(run_id) or "fn"
+        console.print(
+            f"[cyan]Replaying run {run_id} from recorded entity outputs "
+            f"(no execution, director={director_name}).[/cyan]"
+        )
+        result, _ = await _run_with_trace(
+            g, director_name, want_trace=True, replayer=replayer
+        )
+        _print_summary(g, result, director_name)
+        return
+
+    # ---- legacy fallback: LLM-only provider swap ----
     from pharos.entities.llm import LLMAgent
     from pharos.llm.providers.replay import ReplayProvider
+    from pharos.llm.types import Model, ModelCost
     from pharos.runtime import extract_cached_outputs
 
     g, _raw = load_graph(graph)
     cache = extract_cached_outputs(run_id)
     if not cache:
         console.print(
-            f"[yellow]No LLM outputs cached for run {run_id!r}[/yellow]"
+            f"[yellow]No cached outputs for run {run_id!r}[/yellow]"
         )
-
-    # Seed: emit a placeholder prompt so the graph actually fires.
-    # ReplayProvider ignores the prompt text entirely (it replays
-    # cached output), so any value works.
     _seed_input(g, seed_input or "(replay)")
 
-    # Walk all nodes; for any LLMAgent, swap its provider for a
-    # ReplayProvider keyed by node_id.
     swap_count = 0
-    from pharos.llm.types import Model, ModelCost
-
     replay_model = Model(
         id="replay",
         name="Replay (no network)",
@@ -488,13 +515,10 @@ async def _replay_rerun(
             continue
         if not isinstance(node.instance, LLMAgent):
             continue
-        # Replace the provider and model on the existing instance.
         node.instance.provider = ReplayProvider(  # type: ignore[attr-defined]
             node_id=node_id, cache=cache
         )
         node.instance.model = replay_model  # type: ignore[attr-defined]
-        # Skip the provider's setup() — ReplayProvider doesn't need
-        # any async initialization.
         node.instance._initialized = True  # type: ignore[attr-defined]
         swap_count += 1
 

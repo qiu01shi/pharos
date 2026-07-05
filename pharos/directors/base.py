@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from pharos.core.graph import CompositeGraph
+from pharos.core.permissions import PermissionPolicy
 
 
 @dataclass
@@ -54,6 +55,15 @@ class RunContext:
     started_at: float = field(default_factory=time.time)
     config: dict[str, Any] = field(default_factory=dict)
     granted_permissions: set[str] = field(default_factory=set)
+    # Cross-cutting run services, wired by the Director/CLI. Optional so
+    # library callers can run a graph with none of them.
+    tracer: Any = None  # observability.trace.Tracer
+    recorder: Any = None  # runtime.RunRecorder — captures entity outputs
+    replayer: Any = None  # runtime.RunReplayer — replays recorded outputs
+
+    def policy(self) -> PermissionPolicy:
+        """The authorisation policy for this run (from granted_permissions)."""
+        return PermissionPolicy.from_grants(self.granted_permissions)
 
 
 @dataclass
@@ -67,6 +77,13 @@ class FireContext:
     # Permissions propagated from RunContext so entities can
     # check tool permissions during fire().
     granted_permissions: set[str] = field(default_factory=set)
+    # Tracer propagated from RunContext so entities can open child spans
+    # (e.g. LLMAgent tracing each tool execution as its own span).
+    tracer: Any = None
+
+    def policy(self) -> PermissionPolicy:
+        """The authorisation policy for this fire (from granted_permissions)."""
+        return PermissionPolicy.from_grants(self.granted_permissions)
 
 
 @dataclass
@@ -105,17 +122,99 @@ def check_permissions(entity: Any, run_ctx: RunContext) -> None:
     Raises PermissionError if any required permission is missing. This
     MUST be called by every Director before an entity's first fire so
     that RBAC is enforced uniformly regardless of scheduling semantics
-    (FN / SDF / DE).
+    (FN / SDF / DE). The decision is delegated to the run's
+    `PermissionPolicy` so entity-level and tool-level checks share one
+    code path and one alias table.
     """
-    required: set[str] = getattr(entity, "required_permissions", set()) or set()
-    granted: set[str] = getattr(run_ctx, "granted_permissions", set()) or set()
-    missing = required - granted
-    if missing:
-        raise PermissionError(
-            f"entity {entity.node_id!r} ({type(entity).__name__}) "
-            f"requires {sorted(missing)} but run only grants "
-            f"{sorted(granted) if granted else 'no permissions'}"
+    required = getattr(entity, "required_permissions", set()) or set()
+    subject = f"entity {entity.node_id!r} ({type(entity).__name__})"
+    run_ctx.policy().check(required, subject=subject)
+
+
+def build_edge_index(
+    graph: CompositeGraph,
+) -> dict[str, list[tuple[str, str]]]:
+    """Index edges as src_node -> [(dst_node, dst_port), ...] for delivery."""
+    index: dict[str, list[tuple[str, str]]] = {}
+    for e in graph.edges:
+        index.setdefault(e.src_node, []).append((e.dst_node, e.dst_port))
+    return index
+
+
+async def safe_fire(
+    entity: Any, fire_ctx: FireContext, run_ctx: RunContext
+) -> tuple[int, float] | None:
+    """Run an entity's permission-check / setup / fire / record safely.
+
+    This is the single firing path shared by FN / SDF / DE, so RBAC,
+    tracing, replay, and metric collection behave identically no matter
+    which Director drives the run. Returns (token_count, cost).
+
+    Order of operations:
+      1. Permission check (before any setup — fail early).
+      2. Lazy setup() on first fire.
+      3. Open a trace span (if a tracer is registered) and expose the
+         tracer to the entity via FireContext so it can open children.
+      4. Either replay recorded outputs (if a replayer has them for this
+         entity+fire) or call fire(); then record outputs (if recording).
+      5. finish the span and collect (tokens, cost).
+    """
+    from pharos.observability.trace import current_span
+
+    replayer = getattr(run_ctx, "replayer", None)
+    recorder = getattr(run_ctx, "recorder", None)
+
+    # In replay mode the entity never executes, so it needs neither a
+    # permission grant nor setup() (which might create clients / need an
+    # API key). Only live runs are gated and set up.
+    if replayer is None:
+        check_permissions(entity, run_ctx)
+        if not getattr(entity, "_initialized", False):
+            await entity.setup(run_ctx)
+            entity._initialized = True  # type: ignore[attr-defined]
+
+    # Stable per-entity fire index so record/replay keys line up even when
+    # a node fires many times (SDF/DE iterations).
+    fire_index: int = getattr(entity, "_fire_count", 0)
+    entity._fire_count = fire_index + 1  # type: ignore[attr-defined]
+
+    tracer = getattr(run_ctx, "tracer", None)
+    fire_ctx.tracer = tracer
+    parent = current_span()
+    span = None
+    if tracer is not None:
+        span = tracer.start_span(
+            f"entity.fire.{entity.node_id}",
+            parent=parent,
+            attributes={
+                "entity": entity.node_id,
+                "entity_class": type(entity).__name__,
+                "step_id": fire_ctx.step_id,
+                "iter": fire_ctx.iter,
+                "fire_index": fire_index,
+            },
         )
+
+    try:
+        if replayer is not None:
+            # Replay mode: never execute. Re-emit recorded outputs if this
+            # fire was recorded; otherwise emit nothing (a node whose fire
+            # was not recorded simply produces no tokens on replay).
+            if replayer.has(entity.node_id, fire_index):
+                replayer.apply(entity, entity.node_id, fire_index)
+        else:
+            await entity.fire(fire_ctx)
+        if recorder is not None:
+            recorder.capture(entity, entity.node_id, fire_index)
+    except BaseException as e:
+        if span is not None:
+            span.record_exception(e)
+        raise
+    finally:
+        if span is not None and tracer is not None:
+            tracer.finish_span(span)
+
+    return collect_metrics(entity)
 
 
 def collect_metrics(entity: Any) -> tuple[int, float]:
@@ -152,6 +251,7 @@ async def teardown_all(graph: CompositeGraph) -> None:
         with contextlib.suppress(Exception):
             await inst.teardown()
         inst._initialized = False  # type: ignore[attr-defined]
+        inst._fire_count = 0  # type: ignore[attr-defined]
 
 
 async def deliver_upstream(
@@ -246,9 +346,11 @@ __all__ = [
     "FireContext",
     "RunContext",
     "RunResult",
+    "build_edge_index",
     "check_permissions",
     "collect_metrics",
     "deliver_upstream",
+    "safe_fire",
     "teardown_all",
     "topo_layers",
 ]

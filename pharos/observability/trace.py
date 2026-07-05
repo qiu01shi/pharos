@@ -14,6 +14,7 @@ Design notes:
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from contextvars import ContextVar
@@ -22,6 +23,39 @@ from typing import Any, Protocol, runtime_checkable
 
 # Thread-/task-local current span. ContextVar works across asyncio tasks.
 _active_span: ContextVar[Span | None] = ContextVar("pharos_active_span", default=None)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Bounds that keep a single run's trace from growing without limit (the
+# in-memory span list + the persisted JSON). Long agent runs with large
+# tool outputs would otherwise OOM or produce multi-GB run files.
+#   PHAROS_TRACE_MAX_EVENTS — max events kept per span (default 2000)
+#   PHAROS_TRACE_MAX_ATTR   — max chars per string attribute (default 16384)
+MAX_EVENTS_PER_SPAN = _int_env("PHAROS_TRACE_MAX_EVENTS", 2000)
+MAX_ATTR_CHARS = _int_env("PHAROS_TRACE_MAX_ATTR", 16384)
+
+
+def _truncate_value(value: Any, max_chars: int) -> Any:
+    """Recursively cap long strings inside an attribute value."""
+    if isinstance(value, str):
+        if len(value) > max_chars:
+            return value[:max_chars] + f"...(truncated {len(value) - max_chars} chars)"
+        return value
+    if isinstance(value, dict):
+        return {k: _truncate_value(v, max_chars) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_truncate_value(v, max_chars) for v in value]
+    return value
+
+
+def _truncate_attrs(attrs: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    return {k: _truncate_value(v, max_chars) for k, v in attrs.items()}
 
 
 def current_trace_id() -> str | None:
@@ -66,6 +100,11 @@ class Span:
     attributes: dict[str, Any] = field(default_factory=dict)
     events: list[SpanEvent] = field(default_factory=list)
     error: str | None = None
+    # Per-span bounds (copied from the module defaults at creation so a
+    # single span can be tuned independently in tests).
+    max_events: int = MAX_EVENTS_PER_SPAN
+    max_attr_chars: int = MAX_ATTR_CHARS
+    dropped_events: int = 0
 
     @property
     def duration_ms(self) -> float:
@@ -79,12 +118,32 @@ class Span:
     def set_attributes(self, attrs: dict[str, Any]) -> None:
         self.attributes.update(attrs)
 
+    def record_event(
+        self,
+        name: str,
+        attributes: dict[str, Any] | None = None,
+        *,
+        ts: float | None = None,
+    ) -> None:
+        """Append an event, enforcing the per-span cap and truncating long
+        string attributes. Once the cap is hit, further events are counted
+        in `dropped_events` but not stored (keeps memory/JSON bounded).
+        """
+        if len(self.events) >= self.max_events:
+            self.dropped_events += 1
+            return
+        self.events.append(
+            SpanEvent(
+                name=name,
+                ts=ts if ts is not None else time.time(),
+                attributes=_truncate_attrs(attributes or {}, self.max_attr_chars),
+            )
+        )
+
     def add_event(
         self, name: str, attributes: dict[str, Any] | None = None
     ) -> None:
-        self.events.append(
-            SpanEvent(name=name, ts=time.time(), attributes=attributes or {})
-        )
+        self.record_event(name, attributes)
 
     def record_exception(self, exc: BaseException) -> None:
         self.status = "error"
@@ -172,6 +231,8 @@ class InMemoryTracer:
 
 
 __all__ = [
+    "MAX_ATTR_CHARS",
+    "MAX_EVENTS_PER_SPAN",
     "InMemoryTracer",
     "Span",
     "SpanEvent",

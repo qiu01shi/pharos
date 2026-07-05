@@ -23,9 +23,9 @@ from pharos.directors.base import (
     FireContext,
     RunContext,
     RunResult,
-    check_permissions,
-    collect_metrics,
+    build_edge_index,
     deliver_upstream,
+    safe_fire,
     teardown_all,
     topo_layers,
 )
@@ -47,11 +47,7 @@ class DEDirector:
     async def run(
         self, graph: CompositeGraph, ctx: RunContext
     ) -> RunResult:
-        self._edge_index = {}
-        for e in graph.edges:
-            self._edge_index.setdefault(e.src_node, []).append(
-                (e.dst_node, e.dst_port)
-            )
+        self._edge_index = build_edge_index(graph)
 
         layers = topo_layers(graph)
         # Track which source-like nodes have already fired
@@ -87,7 +83,7 @@ class DEDirector:
                         )
                         tasks.append(
                             asyncio.create_task(
-                                _safe_fire(node.instance, fire_ctx, ctx)
+                                safe_fire(node.instance, fire_ctx, ctx)
                             )
                         )
                     if tasks:
@@ -138,46 +134,6 @@ def _should_fire(node, fired_sources: set[str]) -> bool:
         and inst.outs
         and node.id not in fired_sources
     )
-
-
-async def _safe_fire(
-    entity, fire_ctx: FireContext, run_ctx: RunContext
-) -> tuple[int, float] | None:
-    """Fire with optional trace wrapping."""
-    from pharos.observability.trace import current_span
-
-    # Permission check (BEFORE setup) — enforced for DE too.
-    check_permissions(entity, run_ctx)
-
-    if not getattr(entity, "_initialized", False):
-        await entity.setup(run_ctx)
-        entity._initialized = True  # type: ignore[attr-defined]
-
-    tracer = getattr(run_ctx, "tracer", None)
-    parent = current_span()
-    span = None
-    if tracer is not None:
-        span = tracer.start_span(
-            f"entity.fire.{entity.node_id}",
-            parent=parent,
-            attributes={
-                "entity": entity.node_id,
-                "entity_class": type(entity).__name__,
-                "step_id": fire_ctx.step_id,
-                "iter": fire_ctx.iter,
-            },
-        )
-    try:
-        await entity.fire(fire_ctx)
-    except BaseException as e:
-        if span is not None:
-            span.record_exception(e)
-        raise
-    finally:
-        if span is not None and tracer is not None:
-            tracer.finish_span(span)
-
-    return collect_metrics(entity)
 
 
 __all__ = ["DEDirector"]

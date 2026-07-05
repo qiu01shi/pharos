@@ -19,9 +19,9 @@ from pharos.directors.base import (
     FireContext,
     RunContext,
     RunResult,
-    check_permissions,
-    collect_metrics,
+    build_edge_index,
     deliver_upstream,
+    safe_fire,
     teardown_all,
     topo_layers,
 )
@@ -40,11 +40,7 @@ class FNDirector:
         self, graph: CompositeGraph, ctx: RunContext
     ) -> RunResult:
         # Build edge index once per run
-        self._edge_index = {}
-        for e in graph.edges:
-            self._edge_index.setdefault(e.src_node, []).append(
-                (e.dst_node, e.dst_port)
-            )
+        self._edge_index = build_edge_index(graph)
 
         layers = topo_layers(graph)
         if not layers:
@@ -79,7 +75,7 @@ class FNDirector:
                     )
                     tasks.append(
                         asyncio.create_task(
-                            _safe_fire(node.instance, fire_ctx, ctx)
+                            safe_fire(node.instance, fire_ctx, ctx)
                         )
                     )
                 if tasks:
@@ -110,57 +106,6 @@ class FNDirector:
             )
         finally:
             await teardown_all(graph)
-
-
-async def _safe_fire(
-    entity, fire_ctx: FireContext, run_ctx: RunContext
-) -> tuple[int, float] | None:
-    """Run entity.setup/fire/teardown safely. Returns (token_count, cost).
-
-    Captures exceptions and re-raises so the gather() can fail the run.
-    Every fire is wrapped in a span (if a tracer is registered on the
-    run context) so post-hoc analysis and replay have a record.
-
-    Permission check:
-        Before setup(), we compare the entity's `required_permissions`
-        against the run context's `granted_permissions`. If any
-        required permission is missing, raise PermissionError
-        immediately — better than failing partway through a run.
-    """
-    from pharos.observability.trace import current_span
-
-    # Permission check (BEFORE setup) — shared across FN/SDF/DE so
-    # RBAC is enforced no matter which Director drives the run.
-    check_permissions(entity, run_ctx)
-
-    if not getattr(entity, "_initialized", False):
-        await entity.setup(run_ctx)
-        entity._initialized = True  # type: ignore[attr-defined]
-
-    tracer = getattr(run_ctx, "tracer", None)
-    parent = current_span()
-    span = None
-    if tracer is not None:
-        span = tracer.start_span(
-            f"entity.fire.{entity.node_id}",
-            parent=parent,
-            attributes={
-                "entity": entity.node_id,
-                "entity_class": type(entity).__name__,
-                "step_id": fire_ctx.step_id,
-            },
-        )
-    try:
-        await entity.fire(fire_ctx)
-    except BaseException as e:
-        if span is not None:
-            span.record_exception(e)
-        raise
-    finally:
-        if span is not None:
-            tracer.finish_span(span)
-
-    return collect_metrics(entity)
 
 
 __all__ = ["FNDirector"]
