@@ -94,8 +94,11 @@ warn_return_any = false
 # ==================== pytest ====================
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers"
 testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: tests that hit real LLM provider APIs (deselect with '-m \"not integration\"')",
+]
 pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",

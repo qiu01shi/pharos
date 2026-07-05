@@ -198,8 +198,14 @@ async def _run_with_trace(
 @app.command()
 def trace(
     run_id: str = typer.Argument(..., help="Run id to inspect"),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        "-i",
+        help="Open the TUI viewer (falls back to text in non-TTY)",
+    ),
 ) -> None:
-    """Show a recorded run's trace tree (P1: in-memory only)."""
+    """Show a recorded run's trace tree."""
     from pharos.runtime import get_run, list_runs
 
     if run_id == "list":
@@ -227,6 +233,11 @@ def trace(
         console.print(f"[red]No run with id {run_id!r}[/red]")
         console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
         raise typer.Exit(code=1)
+
+    if interactive:
+        from pharos.observability.tui import interactive_view
+        interactive_view(run_id, spans)
+        return
     # Render
     from pharos.observability.trace import Span
 
