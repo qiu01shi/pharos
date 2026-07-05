@@ -107,6 +107,7 @@ pharos/
 - ✅ **Template substitution** — `--var key=value` replaces `${NAME}` in double-quoted YAML strings
 - ✅ **Subgraph composability** — embed a whole graph as one node (`type: subgraph`), with its own Director (heterogeneous nested scheduling), YAML `ref`, and cycle detection
 - ✅ **Tools as first-class nodes** — `type: tool` schedules a single tool as a graph node with typed ports and its own RBAC
+- ✅ **Retry with backoff** — add `retry: { max_attempts, backoff_s }` to any node to re-fire it on failure (wraps the node in a `RetryEntity`)
 - ✅ **General record/replay** — every entity's output tokens (shell / python / tool / subgraph, not just LLM) are captured and re-emitted for byte-equal offline replay
 
 ### What pharos deliberately doesn't do
@@ -253,7 +254,7 @@ The dataflow runtime has near-zero overhead — 90 concurrent entities finish in
 - 100 concurrent actors: P95 ≈ 10ms
 - 6 LLM providers (incl. ReplayProvider)
 - 3 Directors: FN / SDF / DE
-- 7 built-in Entities: `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `ToolEntity`, `SubgraphEntity` + custom Python — plus ToolRegistry (7 coding tools)
+- 8 built-in Entities: `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `ToolEntity`, `SubgraphEntity`, `RetryEntity` + custom Python — plus ToolRegistry (7 coding tools)
 - 6 CLI subcommands
 
 ---

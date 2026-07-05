@@ -115,6 +115,19 @@ class SubgraphNodeSpec(BaseModel):
     converge_k: int = 2
 
 
+class RetrySpec(BaseModel):
+    """Optional `retry:` block on any node — wrap it in a RetryEntity.
+
+    Example:
+        - id: flaky
+          type: shell
+          retry: { max_attempts: 3, backoff_s: 0.5 }
+    """
+
+    max_attempts: int = 3
+    backoff_s: float = 0.0
+
+
 class PythonNodeSpec(BaseModel):
     """Configuration for a `type: python` node.
 
@@ -353,6 +366,26 @@ def _add_subgraph_node(
     )
 
 
+def _maybe_wrap_retry(node_raw: dict[str, Any], inner: Entity) -> Entity:
+    """Wrap `inner` in a RetryEntity if the node declares a `retry:` block.
+
+    Works for every non-subgraph node type since it operates on the already
+    built entity rather than a specific spec model.
+    """
+    retry_raw = node_raw.get("retry")
+    if not retry_raw:
+        return inner
+    from pharos.entities.retry import RetryEntity
+
+    rspec = RetrySpec.model_validate(retry_raw)
+    return RetryEntity(
+        node_id=inner.node_id,
+        inner=inner,
+        max_attempts=rspec.max_attempts,
+        backoff_s=rspec.backoff_s,
+    )
+
+
 def load_graph_from_text(
     text: str,
     base_dir: str | Path | None = None,
@@ -387,6 +420,7 @@ def load_graph_from_dict(
             _add_subgraph_node(g, node_raw, base_dir, _loading)
         else:
             entity = _build_entity(node_raw)
+            entity = _maybe_wrap_retry(node_raw, entity)
             g.add_entity(entity.node_id, entity)
 
     for e in spec.edges:
@@ -433,6 +467,7 @@ __all__ = [
     "GraphSpec",
     "LLMNodeSpec",
     "PythonNodeSpec",
+    "RetrySpec",
     "ShellNodeSpec",
     "SubgraphNodeSpec",
     "ToolNodeSpec",
