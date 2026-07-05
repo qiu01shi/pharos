@@ -9,9 +9,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Copy link mode avoids "Failed to spawn: ruff" when uv restores a
-    # cache whose hardlink targets are missing/stale on the runner.
     env:
+      # Pin one interpreter for the whole job so `uv sync` and every
+      # `uv run` use the same env. Without this, `uv run` re-resolves to
+      # the default 3.11 and rebuilds a fresh env on the 3.12 job, which
+      # broke `uv run ruff` with "Failed to spawn: ruff".
+      UV_PYTHON: ${{ matrix.python-version }}
+      # Copy instead of hardlink so a restored cache with stale link
+      # targets can't break spawned tool binaries.
       UV_LINK_MODE: copy
     strategy:
       fail-fast: false
