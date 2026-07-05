@@ -200,18 +200,26 @@ def _build_python_entity(nid: str, spec: PythonNodeSpec) -> Entity:
         return cls(node_id=nid)  # type: ignore[call-arg,abstract]
 
 
-def load_graph(
-    path: str | Path,
+def load_graph_from_text(
+    text: str,
 ) -> tuple[CompositeGraph, dict[str, Any]]:
-    """Load a YAML graph spec into a CompositeGraph.
+    """Like `load_graph` but from a string (after var substitution).
 
-    Returns (graph, raw_spec_dict). The raw dict is returned so the
-    CLI can show validation messages with full context.
+    Returns (graph, raw_spec_dict).
     """
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    raw = yaml.safe_load(text)
     if not isinstance(raw, dict):
-        raise ValueError(f"{path}: top-level must be a mapping")
+        raise ValueError("graph YAML must be a mapping")
+    return load_graph_from_dict(raw)
 
+
+def load_graph_from_dict(
+    raw: dict[str, Any],
+) -> tuple[CompositeGraph, dict[str, Any]]:
+    """Like `load_graph` but from an already-parsed dict.
+
+    Returns (graph, raw_spec_dict).
+    """
     spec = GraphSpec.model_validate(raw)
 
     g = CompositeGraph(name=spec.name)
@@ -225,7 +233,6 @@ def load_graph(
     errors = g.validate()
     if errors:
         # Allow cycles if the director supports them (SDF).
-        # The Director itself decides whether to honor feedback.
         director = raw.get("director", "fn") if isinstance(raw, dict) else "fn"
         only_cycle = all("cycle" in e for e in errors)
         if not (only_cycle and director in ("sdf",)):
@@ -234,10 +241,27 @@ def load_graph(
     return g, raw
 
 
+def load_graph(
+    path: str | Path,
+) -> tuple[CompositeGraph, dict[str, Any]]:
+    """Load a YAML graph spec into a CompositeGraph.
+
+    Returns (graph, raw_spec_dict). The raw dict is returned so the
+    CLI can show validation messages with full context.
+    """
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: top-level must be a mapping")
+    return load_graph_from_dict(raw)
+
+
 __all__ = [
     "EdgeSpec",
     "GraphSpec",
     "LLMNodeSpec",
+    "PythonNodeSpec",
     "ShellNodeSpec",
     "load_graph",
+    "load_graph_from_dict",
+    "load_graph_from_text",
 ]

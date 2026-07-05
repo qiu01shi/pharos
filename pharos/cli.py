@@ -20,7 +20,7 @@ from pharos.directors.base import RunContext
 from pharos.directors.de import DEDirector
 from pharos.directors.fn import FNDirector
 from pharos.directors.sdf import SDFDirector
-from pharos.ir import load_graph
+from pharos.ir import load_graph, load_graph_from_text
 from pharos.observability.backend.console import ConsoleTraceBackend
 from pharos.observability.trace import InMemoryTracer
 
@@ -57,6 +57,24 @@ def main(
 def run(
     graph: Path = typer.Argument(..., help="Path to YAML graph"),
     input: str = typer.Option("", "--input", "-i", help="Initial prompt text"),
+    input_extra: list[str] = typer.Option(
+        [],
+        "--input-extra",
+        help=(
+            "Extra inputs as port=value (repeatable). "
+            "E.g. --input-extra text=hello --input-extra msg=world. "
+            "Seeds `__in__.<port>` for any port not in --input."
+        ),
+    ),
+    var: list[str] = typer.Option(
+        [],
+        "--var",
+        help=(
+            "Variable substitution as key=value (repeatable). "
+            "Replaces `${var_name}` and `$var_name` in the graph YAML "
+            "before loading."
+        ),
+    ),
     json_out: bool = typer.Option(False, "--json", help="Output JSON"),
     trace: bool = typer.Option(False, "--trace", help="Show trace after run"),
     max_iters: int = typer.Option(
@@ -67,8 +85,20 @@ def run(
     ),
 ) -> None:
     """Load a graph and run it once with --input as the initial prompt."""
-    g, raw = load_graph(graph)
-    _seed_input(g, input)
+    raw_text = _substitute_vars(graph, var)
+    g, raw = load_graph_from_text(raw_text)
+    seed_map: dict[str, str] = {}
+    if input:
+        seed_map["prompt"] = input
+    for item in input_extra:
+        if "=" not in item:
+            console.print(
+                f"[red]Invalid --input-extra (expected port=value): {item!r}[/red]"
+            )
+            raise typer.Exit(code=1)
+        k, _, v = item.partition("=")
+        seed_map[k.strip()] = v
+    _seed_inputs(g, seed_map)
     director_name = raw.get("director", "fn")
     result, _backend = asyncio.run(
         _run_with_trace(g, director_name, trace, max_iters, converge_k)
@@ -144,25 +174,80 @@ def _which_version(cmd: str) -> str | None:
 
 
 def _seed_input(g: CompositeGraph, text: str) -> None:
-    """Inject `text` into __in__.<port> for any node that pulls from it.
+    """Inject `text` into `__in__.prompt` for any node that pulls from it.
 
-    Convention: if a node has an `in` named `prompt` and is connected
-    from `__in__.prompt`, we put the text there.
+    For multi-port graphs, use `_seed_inputs(g, {"port": "value", ...})`.
     """
     if not text:
         return
-    # We don't actually materialize __in__ nodes; instead we look for
-    # edges of the form __in__.<port> -> node.<port> and write to the
-    # destination's input buffer.
+    _seed_inputs(g, {"prompt": text})
+
+
+def _seed_inputs(g: CompositeGraph, port_to_value: dict[str, str]) -> None:
+    """Emit TypedValue strings into multiple `__in__.<port>` destinations.
+
+    Each entry in `port_to_value` is written to every edge that
+    originates from `__in__.<port>`. Same port can fan out to
+    multiple entity input ports.
+    """
+    if not port_to_value:
+        return
     for edge in g.edges:
-        if edge.src_node == "__in__":
-            port = edge.dst_node
-            if port in g.nodes and g.node(port).instance is not None:
-                ins = g.node(port).instance.ins
-                if edge.dst_port in ins:
-                    ins[edge.dst_port].emit(
-                        TypedValue(type="text", payload=text)
-                    )
+        if edge.src_node != "__in__":
+            continue
+        if edge.src_port not in port_to_value:
+            continue
+        value = port_to_value[edge.src_port]
+        tgt = g.node(edge.dst_node)
+        if tgt.instance is None:
+            continue
+        if edge.dst_port in tgt.instance.ins:
+            tgt.instance.ins[edge.dst_port].emit(
+                TypedValue(type="text", payload=value)
+            )
+
+
+def _substitute_vars(graph: Path, vars_list: list[str]) -> str:
+    """Read a graph YAML and substitute `${var}` / `$var` placeholders.
+
+    Each entry in `vars_list` is `key=value`. Replacement happens
+    on the raw text (before YAML parse) so values can be quoted,
+    multi-line, etc.
+
+    Unknown vars (referenced but not provided) raise an error at
+    load time — better to fail fast than to silently use ''.
+    """
+    text = Path(graph).read_text(encoding="utf-8")
+    var_map: dict[str, str] = {}
+    for item in vars_list:
+        if "=" not in item:
+            raise ValueError(f"Invalid --var (expected key=value): {item!r}")
+        k, _, v = item.partition("=")
+        var_map[k.strip()] = v
+    if not var_map:
+        return text
+
+    import re
+
+    # Match `${NAME}` only inside double-quoted YAML strings.
+    # This avoids interfering with:
+    #   - YAML comments (# something ${foo})
+    #   - Unquoted keys/values that happen to contain $
+    #   - Shell expansion in CI scripts
+    # Pattern: " ... ${NAME} ... " — the closing quote is on the
+    # same line. Multi-line strings are not currently supported
+    # for substitution (uncommon in our YAML).
+    pattern = re.compile(r'"([^"\n]*?)\$\{([A-Za-z_][A-Za-z0-9_]*)\}([^"\n]*?)"')
+
+    def repl(m: re.Match[str]) -> str:
+        before, name, after = m.group(1), m.group(2), m.group(3)
+        if name not in var_map:
+            raise ValueError(
+                f"graph references ${{{name}}} but --var {name}=... was not provided"
+            )
+        return f'"{before}{var_map[name]}{after}"'
+
+    return pattern.sub(repl, text)
 
 
 async def _run_with_trace(

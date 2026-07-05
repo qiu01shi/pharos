@@ -1,0 +1,31 @@
+name: code-fix-workflow
+director: sdf    # 反馈循环
+
+nodes:
+  - id: planner
+    type: llm
+    provider: glm
+    model: glm-4.5-air
+    system: "你根据用户需求决定要不要跑 shell 命令。回复 PASS(不用)或 shell: <cmd>"
+    max_tokens: 100
+
+  - id: runner
+    type: shell
+    timeout: 10
+
+  - id: reviewer
+    type: llm
+    provider: glm
+    model: glm-4.5-air
+    system: "检查 shell 输出是否合理。回复 OK 或 RETRY: <新 cmd>"
+    max_tokens: 100
+
+edges:
+  # 输入 → planner
+  - { src: __in__.task,       dst: planner.prompt }
+  # planner 输出 → runner.command
+  - { src: planner.text,      dst: runner.command }
+  # runner 输出 → reviewer
+  - { src: runner.stdout,     dst: reviewer.prompt }
+  # reviewer 输出 → __out__
+  - { src: reviewer.text,     dst: __out__.final }

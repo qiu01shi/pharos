@@ -1,0 +1,15 @@
+name: template-demo
+director: fn
+
+# 用 `${name}` 形式引用 --var 传入的值(不是裸 $name)
+nodes:
+  - id: agent
+    type: faux
+    provider: faux
+    model: "${model_name}"
+    system: "${system_prompt}"
+    max_tokens: 100
+
+edges:
+  - { src: __in__.prompt, dst: agent.prompt }
+  - { src: agent.text,    dst: __out__.response }

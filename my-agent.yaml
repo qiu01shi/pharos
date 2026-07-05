@@ -1,0 +1,14 @@
+name: my-first-agent
+director: fn
+
+nodes:
+  - id: agent
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "Reply briefly."
+    max_tokens: 100
+
+edges:
+  - { src: __in__.prompt,  dst: agent.prompt }
+  - { src: agent.text,     dst: __out__.response }

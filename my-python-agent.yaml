@@ -1,0 +1,21 @@
+name: my-python-agent
+director: fn
+
+nodes:
+  - id: counter
+    type: python
+    class: "my_entities:WordCounter"
+    # params: {}  # 用默认 __init__
+
+  - id: prefixer
+    type: python
+    class: "my_entities:PrefixAdder"
+    params:
+      prefix: "🎯 "
+
+edges:
+  - { src: __in__.text,   dst: counter.text }
+  - { src: __in__.msg,    dst: prefixer.in }
+  # 输出两个 entity 的结果
+  - { src: counter.count, dst: __out__.word_count }
+  - { src: prefixer.out,  dst: __out__.prefixed_msg }
