@@ -212,11 +212,22 @@ def extract_cached_outputs(run_id: str) -> dict[str, dict[str, Any]]:
 # ---------- P1/P2 functions (unchanged) ----------
 
 
-def record_run(run_id: str, spans: list[Any]) -> None:
+def record_run(
+    run_id: str,
+    spans: list[Any],
+    *,
+    outputs: dict[str, list[dict[str, Any]]] | None = None,
+    director: str | None = None,
+) -> None:
     _ensure_dir()
     payload = {
         "run_id": run_id,
         "recorded_at": datetime.now().isoformat(),
+        "director": director or "",
+        # General entity-output cache (node_id:fire_index -> [emitted values]).
+        # Enables byte-equal replay of ANY entity (LLM / shell / python /
+        # tool), not just LLM providers.
+        "outputs": outputs or {},
         "spans": [
             {
                 "id": s.id,
@@ -234,8 +245,96 @@ def record_run(run_id: str, spans: list[Any]) -> None:
             for s in spans
         ],
     }
-    _run_path(run_id).write_text(json.dumps(payload, indent=2))
+    _run_path(run_id).write_text(json.dumps(payload, indent=2, default=str))
     _enforce_cap()
+
+
+def get_run_outputs(run_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Return the recorded entity-output cache for a run (empty if none)."""
+    p = _run_path(run_id)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    outputs = data.get("outputs", {})
+    return outputs if isinstance(outputs, dict) else {}
+
+
+def get_run_director(run_id: str) -> str:
+    """Return the director name recorded for a run (empty if unknown)."""
+    p = _run_path(run_id)
+    if not p.exists():
+        return ""
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(data.get("director", ""))
+
+
+class RunRecorder:
+    """Captures each entity's emitted output tokens during a run.
+
+    Keyed by ``"<node_id>:<fire_index>"`` so a node that fires many times
+    (SDF/DE iterations) records each fire separately. Directors call
+    ``capture()`` from ``safe_fire`` right after ``fire()`` returns, while
+    the tokens still sit in the entity's output ports (delivery happens
+    later). The result is a provider-agnostic replay cache.
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[str, list[dict[str, Any]]] = {}
+
+    def capture(self, entity: Any, node_id: str, fire_index: int) -> None:
+        emitted: list[dict[str, Any]] = []
+        for port_name, port in entity.outs.items():
+            for tok in port.peek_all():
+                emitted.append(
+                    {
+                        "port": port_name,
+                        "type": tok.value.type,
+                        "payload": tok.value.payload,
+                    }
+                )
+        self._data[f"{node_id}:{fire_index}"] = emitted
+
+    def to_dict(self) -> dict[str, list[dict[str, Any]]]:
+        return dict(self._data)
+
+
+class RunReplayer:
+    """Replays recorded entity outputs onto ports, skipping execution.
+
+    ``safe_fire`` consults ``has()`` and, when a fire was recorded, calls
+    ``apply()`` to re-emit the cached tokens instead of running the entity.
+    Because it works at the entity output boundary, it replays shell
+    commands, python entities, and tools too — not only LLM calls.
+    """
+
+    def __init__(self, data: dict[str, list[dict[str, Any]]]) -> None:
+        self._data = data
+
+    @classmethod
+    def load(cls, run_id: str) -> RunReplayer | None:
+        outputs = get_run_outputs(run_id)
+        if not outputs:
+            return None
+        return cls(outputs)
+
+    def has(self, node_id: str, fire_index: int) -> bool:
+        return f"{node_id}:{fire_index}" in self._data
+
+    def apply(self, entity: Any, node_id: str, fire_index: int) -> None:
+        from pharos.core.token import TypedValue
+
+        for rec in self._data.get(f"{node_id}:{fire_index}", []):
+            port = entity.outs.get(rec["port"])
+            if port is not None:
+                port.emit(
+                    TypedValue(type=rec["type"], payload=rec["payload"])
+                )
 
 
 def _enforce_cap() -> None:
@@ -292,9 +391,13 @@ def export_run_json(run_id: str, path: Path) -> None:
 
 
 __all__ = [
+    "RunRecorder",
+    "RunReplayer",
     "export_run_json",
     "extract_cached_outputs",
     "get_run",
+    "get_run_director",
+    "get_run_outputs",
     "list_runs",
     "record_run",
     "replay_run_summary",

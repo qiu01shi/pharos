@@ -1,0 +1,20 @@
+# Tools as first-class graph nodes.
+#
+# Instead of hiding a tool inside an LLMAgent's tool-call loop, expose it
+# as its own node. The Director enforces the tool's permission at the
+# graph level (this node declares `fs:read`), and the tool execution is
+# traced/replayed like any other entity.
+#
+# Run:
+#   uv run pharos run graphs/07_tool_node.yaml \
+#       --input-extra input=README.md --grant fs:read
+name: tool-node-demo
+director: fn
+nodes:
+  - id: reader
+    type: tool
+    tool: read
+    preset: coding
+edges:
+  - { src: __in__.input,   dst: reader.input }
+  - { src: reader.output,  dst: __out__.content }

@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from pharos.core.permissions import PermissionPolicy
 from pharos.llm.types import Tool
 
 
@@ -140,18 +141,20 @@ class ToolRegistry:
                 error=str(e),
             )
 
-        # Permission check
+        # Permission check — routed through the same PermissionPolicy the
+        # Director uses for entity-level RBAC, so tool and entity checks
+        # share one decision function and one capability-alias table.
         required = tool.get("required_permission")
-        if required and (
-            granted_permissions is None or required not in granted_permissions
-        ):
-            return ToolCallResult(
-                tool_call_id=tool_call_id,
-                name=name,
-                output="",
-                is_error=True,
-                error=f"permission denied: requires {required!r}",
-            )
+        if required:
+            policy = PermissionPolicy.from_grants(granted_permissions)
+            if not policy.allows(required):
+                return ToolCallResult(
+                    tool_call_id=tool_call_id,
+                    name=name,
+                    output="",
+                    is_error=True,
+                    error=f"permission denied: requires {required!r}",
+                )
 
         # Execute — detect async fn and await if needed
         fn = tool["fn"]

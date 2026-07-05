@@ -23,7 +23,10 @@ from pharos.directors.base import (
     FireContext,
     RunContext,
     RunResult,
+    build_edge_index,
     deliver_upstream,
+    safe_fire,
+    teardown_all,
     topo_layers,
 )
 
@@ -44,11 +47,7 @@ class DEDirector:
     async def run(
         self, graph: CompositeGraph, ctx: RunContext
     ) -> RunResult:
-        self._edge_index = {}
-        for e in graph.edges:
-            self._edge_index.setdefault(e.src_node, []).append(
-                (e.dst_node, e.dst_port)
-            )
+        self._edge_index = build_edge_index(graph)
 
         layers = topo_layers(graph)
         # Track which source-like nodes have already fired
@@ -59,61 +58,66 @@ class DEDirector:
         converged = False
         final_iter = 0
 
-        for it in range(self.max_iterations):
-            final_iter = it + 1
-            step_counter = it * 1000
-            fired_this_round = False
+        try:
+            for it in range(self.max_iterations):
+                final_iter = it + 1
+                step_counter = it * 1000
+                fired_this_round = False
 
-            for layer in layers:
-                tasks = []
-                for nid in layer:
-                    node = graph.node(nid)
-                    if node.instance is None:
-                        continue
-                    if not _should_fire(node, fired_sources):
-                        continue
-                    fired_sources.add(nid)
-                    fire_ctx = FireContext(
-                        run_id=ctx.run_id,
-                        step_id=f"{ctx.run_id}:{step_counter + 1}",
-                        iter=it,
-                        granted_permissions=getattr(ctx, "granted_permissions", set()),
-                    )
-                    tasks.append(
-                        asyncio.create_task(
-                            _safe_fire(node.instance, fire_ctx, ctx)
+                for layer in layers:
+                    tasks = []
+                    for nid in layer:
+                        node = graph.node(nid)
+                        if node.instance is None:
+                            continue
+                        if not _should_fire(node, fired_sources):
+                            continue
+                        fired_sources.add(nid)
+                        fire_ctx = FireContext(
+                            run_id=ctx.run_id,
+                            step_id=f"{ctx.run_id}:{step_counter + 1}",
+                            iter=it,
+                            granted_permissions=getattr(
+                                ctx, "granted_permissions", set()
+                            ),
                         )
-                    )
-                if tasks:
-                    fired_this_round = True
-                    results = await asyncio.gather(
-                        *tasks, return_exceptions=True
-                    )
-                    for r in results:
-                        if isinstance(r, BaseException):
-                            return RunResult(
-                                converged=False,
-                                iterations=final_iter,
-                                tokens_emitted=total_tokens,
-                                cost_usd=total_cost,
-                                error=f"{type(r).__name__}: {r}",
+                        tasks.append(
+                            asyncio.create_task(
+                                safe_fire(node.instance, fire_ctx, ctx)
                             )
-                        if r is not None:
-                            total_tokens += r[0]
-                            total_cost += r[1]
+                        )
+                    if tasks:
+                        fired_this_round = True
+                        results = await asyncio.gather(
+                            *tasks, return_exceptions=True
+                        )
+                        for r in results:
+                            if isinstance(r, BaseException):
+                                return RunResult(
+                                    converged=False,
+                                    iterations=final_iter,
+                                    tokens_emitted=total_tokens,
+                                    cost_usd=total_cost,
+                                    error=f"{type(r).__name__}: {r}",
+                                )
+                            if r is not None:
+                                total_tokens += r[0]
+                                total_cost += r[1]
 
-                await deliver_upstream(graph, self._edge_index)
+                    await deliver_upstream(graph, self._edge_index)
 
-            if not fired_this_round:
-                converged = True
-                break
+                if not fired_this_round:
+                    converged = True
+                    break
 
-        return RunResult(
-            converged=converged,
-            iterations=final_iter,
-            tokens_emitted=total_tokens,
-            cost_usd=total_cost,
-        )
+            return RunResult(
+                converged=converged,
+                iterations=final_iter,
+                tokens_emitted=total_tokens,
+                cost_usd=total_cost,
+            )
+        finally:
+            await teardown_all(graph)
 
 
 def _should_fire(node, fired_sources: set[str]) -> bool:
@@ -130,45 +134,6 @@ def _should_fire(node, fired_sources: set[str]) -> bool:
         and inst.outs
         and node.id not in fired_sources
     )
-
-
-async def _safe_fire(
-    entity, fire_ctx: FireContext, run_ctx: RunContext
-) -> tuple[int, float] | None:
-    """Fire with optional trace wrapping."""
-    from pharos.observability.trace import current_span
-
-    if not getattr(entity, "_initialized", False):
-        await entity.setup(run_ctx)
-        entity._initialized = True  # type: ignore[attr-defined]
-
-    tracer = getattr(run_ctx, "tracer", None)
-    parent = current_span()
-    span = None
-    if tracer is not None:
-        span = tracer.start_span(
-            f"entity.fire.{entity.node_id}",
-            parent=parent,
-            attributes={
-                "entity": entity.node_id,
-                "entity_class": type(entity).__name__,
-                "step_id": fire_ctx.step_id,
-                "iter": fire_ctx.iter,
-            },
-        )
-    try:
-        await entity.fire(fire_ctx)
-    except BaseException as e:
-        if span is not None:
-            span.record_exception(e)
-        raise
-    finally:
-        if span is not None and tracer is not None:
-            tracer.finish_span(span)
-
-    token_count = sum(len(p) for p in entity.outs.values())
-    cost = sum(t.cost_usd for p in entity.outs.values() for t in p.peek_all())
-    return (token_count, cost)
 
 
 __all__ = ["DEDirector"]

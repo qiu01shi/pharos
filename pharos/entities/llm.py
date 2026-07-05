@@ -12,7 +12,6 @@ Behavior:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,7 +28,6 @@ from pharos.llm.types import (
     Usage,
     UserMessage,
 )
-from pharos.observability.trace import SpanEvent as _SpanEvent
 from pharos.observability.trace import current_span as _current_span_fn
 
 
@@ -171,6 +169,11 @@ class LLMAgent(Entity):
         total_usage = Usage()
         # Record events onto the active span (if any) for replay.
         span = _current_span_fn()
+        # Tracer from the fire context lets us open a child span per tool
+        # execution, so tools show up as first-class nodes in the trace
+        # tree (nested under this entity's fire span) instead of being an
+        # opaque black box inside one node.
+        tracer = getattr(ctx, "tracer", None)
 
         # Tool-call loop: keep calling LLM until it stops emitting
         # tool calls, or max_tool_iterations is hit.
@@ -196,8 +199,20 @@ class LLMAgent(Entity):
                 accumulated_thinking += think_delta
             if round_text_final and not accumulated:
                 accumulated = round_text_final
+            # Accumulate usage across every round of the tool-call loop.
+            # Usage is frozen, so build a new summed instance each round —
+            # otherwise multi-turn tool loops would only report the LAST
+            # round's tokens/cost.
             if round_usage.input or round_usage.output:
-                total_usage = round_usage
+                total_usage = Usage(
+                    input=total_usage.input + round_usage.input,
+                    output=total_usage.output + round_usage.output,
+                    cache_read=total_usage.cache_read + round_usage.cache_read,
+                    cache_write=total_usage.cache_write + round_usage.cache_write,
+                    cache_write_1h=(
+                        total_usage.cache_write_1h + round_usage.cache_write_1h
+                    ),
+                )
             all_tool_calls.extend(tool_calls_this_round)
 
             # If we have an error or no tool calls, we're done.
@@ -250,37 +265,41 @@ class LLMAgent(Entity):
                 {"name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id}
                 for tc in tool_calls_this_round
             ]
-            if span is not None:
+            # Open one child span per tool call (nested under this fire's
+            # span) before executing them in parallel.
+            tool_spans: dict[str, Any] = {}
+            if tracer is not None and span is not None:
                 for tc in tool_calls_this_round:
-                    span.events.append(
-                        _SpanEvent(
-                            name="tool.execute.start",
-                            ts=time.time(),
-                            attributes={
-                                "tool_name": tc.name,
-                                "arguments": tc.arguments,
-                            },
-                        )
+                    tool_spans[tc.id] = tracer.start_span(
+                        f"tool.execute.{tc.name}",
+                        parent=span,
+                        attributes={
+                            "tool_name": tc.name,
+                            "arguments": tc.arguments,
+                            "tool_call_id": tc.id,
+                        },
                     )
             results = await self.config.tool_registry.execute_batch(
                 tool_call_dicts,
                 granted_permissions=granted,
             )
             for tc, result in zip(tool_calls_this_round, results, strict=True):
-                if span is not None:
-                    span.events.append(
-                        _SpanEvent(
-                            name="tool.execute.end",
-                            ts=time.time(),
-                            attributes={
-                                "tool_call_id": tc.id,
-                                "tool_name": tc.name,
-                                "output": result.output,
-                                "is_error": result.is_error,
-                                "error": result.error,
-                            },
-                        )
+                tsp = tool_spans.get(tc.id)
+                if tsp is not None and tracer is not None:
+                    out = result.output or ""
+                    maxc = tsp.max_attr_chars
+                    if len(out) > maxc:
+                        out = out[:maxc] + f"...(truncated {len(out) - maxc} chars)"
+                    tsp.set_attributes(
+                        {
+                            "output": out,
+                            "is_error": result.is_error,
+                            "error": result.error,
+                        }
                     )
+                    if result.is_error:
+                        tsp.status = "error"
+                    tracer.finish_span(tsp)
                 messages.append(
                     _TR(
                         tool_call_id=tc.id,
@@ -360,26 +379,23 @@ class LLMAgent(Entity):
             async for ev in self.provider.stream(self.model, context, options):
                 # Forward event to the trace span for replay support.
                 if span is not None:
-                    span.events.append(
-                        _SpanEvent(
-                            name=ev.type,
-                            ts=time.time(),
-                            attributes={
-                                "delta": ev.delta,
-                                "content_index": ev.content_index,
-                                "tool_call": (
-                                    ev.tool_call.model_dump()
-                                    if ev.tool_call
-                                    else None
-                                ),
-                                "message": (
-                                    ev.message.model_dump()
-                                    if ev.message
-                                    else None
-                                ),
-                                "error": ev.error,
-                            },
-                        )
+                    span.record_event(
+                        ev.type,
+                        {
+                            "delta": ev.delta,
+                            "content_index": ev.content_index,
+                            "tool_call": (
+                                ev.tool_call.model_dump()
+                                if ev.tool_call
+                                else None
+                            ),
+                            "message": (
+                                ev.message.model_dump()
+                                if ev.message
+                                else None
+                            ),
+                            "error": ev.error,
+                        },
                     )
                 if ev.type == "text_delta" and ev.delta:
                     text_delta += ev.delta

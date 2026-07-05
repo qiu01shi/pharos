@@ -8,7 +8,9 @@ from pharos.core.graph import CompositeGraph
 from pharos.core.port import InputPort, OutputPort
 from pharos.core.token import TypedValue
 from pharos.directors.base import RunContext
+from pharos.directors.de import DEDirector
 from pharos.directors.fn import FNDirector
+from pharos.directors.sdf import SDFDirector
 
 # ---------- test entities ----------
 
@@ -140,3 +142,67 @@ class TestMixedEntities:
         # In practice the error propagates from the gather().
         assert result.converged is False
         assert "PermissionError" in (result.error or "")
+
+
+class TestPermissionEnforcedAcrossDirectors:
+    """RBAC must be enforced regardless of which Director drives the run.
+
+    Regression guard: previously only FNDirector checked permissions, so
+    SDF/DE silently ran permission-gated entities without a grant.
+    """
+
+    async def test_sdf_enforces_permissions(self):
+        g = CompositeGraph("g")
+        g.add_entity("shell", _Shell("shell"))
+        g.nodes["shell"].instance.ins["cmd"].emit(  # type: ignore[union-attr]
+            TypedValue(type="text", payload="ls")
+        )
+        d = SDFDirector(max_iterations=3)
+        ctx = RunContext(run_id=str(uuid.uuid4()))  # no grant
+        result = await d.run(g, ctx)
+        assert result.converged is False
+        assert "shell:execute" in (result.error or "")
+
+    async def test_de_enforces_permissions(self):
+        g = CompositeGraph("g")
+        g.add_entity("shell", _Shell("shell"))
+        g.nodes["shell"].instance.ins["cmd"].emit(  # type: ignore[union-attr]
+            TypedValue(type="text", payload="ls")
+        )
+        d = DEDirector(max_iterations=3)
+        ctx = RunContext(run_id=str(uuid.uuid4()))  # no grant
+        result = await d.run(g, ctx)
+        assert result.converged is False
+        assert "shell:execute" in (result.error or "")
+
+
+class TestTeardownReleasesResources:
+    """Directors must call teardown() so providers close their clients."""
+
+    async def test_teardown_called_after_run(self):
+        torn_down: list[str] = []
+
+        @entity
+        class _Res(Entity):
+            ins = {"x": InputPort(name="x", accepted_types=["text"])}
+            outs = {"y": OutputPort(name="y", accepted_types=["text"])}
+
+            async def setup(self, ctx):  # type: ignore[override]
+                self._initialized = True
+
+            async def fire(self, ctx):  # type: ignore[override]
+                for t in self.ins["x"].consume():
+                    self.outs["y"].emit(t.value)
+
+            async def teardown(self):  # type: ignore[override]
+                torn_down.append(self.node_id)
+
+        g = CompositeGraph("g")
+        g.add_entity("res", _Res("res"))
+        g.nodes["res"].instance.ins["x"].emit(  # type: ignore[union-attr]
+            TypedValue(type="text", payload="hi")
+        )
+        d = FNDirector()
+        result = await d.run(g, RunContext(run_id=str(uuid.uuid4())))
+        assert result.converged is True
+        assert torn_down == ["res"]

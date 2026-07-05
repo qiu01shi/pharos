@@ -49,7 +49,11 @@ class LLMNodeSpec(BaseModel):
 
     id: str
     type: Literal["llm", "faux"] = "llm"
-    provider: Literal["openai", "glm", "faux", "anthropic", "deepseek", "minimax"] = "openai"
+    # Any name resolvable by `_resolve_provider_class` (static map or the
+    # runtime registry). Kept as a free string so newly registered
+    # providers work in YAML without editing this schema; unknown names
+    # raise a clear error at load time in `_resolve_provider_class`.
+    provider: str = "openai"
     model: str
     system: str = ""
     temperature: float | None = None
@@ -70,6 +74,23 @@ class ShellNodeSpec(BaseModel):
     type: Literal["shell"] = "shell"
     timeout: float = 300.0
     cwd: str | None = None
+
+
+class ToolNodeSpec(BaseModel):
+    """Configuration for a `type: tool` node — one tool as a graph node.
+
+    Example:
+        - id: read_file
+          type: tool
+          tool: read
+          preset: coding      # which registry to build the tool from
+    """
+
+    id: str
+    type: Literal["tool"] = "tool"
+    tool: str
+    preset: Literal["coding", "builtin"] = "coding"
+    arg_key: str | None = None
 
 
 class PythonNodeSpec(BaseModel):
@@ -152,13 +173,13 @@ def _resolve_provider_class(name: str) -> type:
     # Lazy import to avoid circular dependencies
     from pharos.llm.registry import get_provider_class, list_providers
 
-    cls = get_provider_class(name)
-    if cls is None:
+    try:
+        return get_provider_class(name)
+    except KeyError:
+        known = sorted(set(list(_PROVIDER_CLASSES) + list(list_providers())))
         raise ValueError(
-            f"unknown LLM provider: {name!r}. "
-            f"Known: {sorted(set(list(_PROVIDER_CLASSES) + list(list_providers())))}"
-        )
-    return cls
+            f"unknown LLM provider: {name!r}. Known: {known}"
+        ) from None
 
 
 def _build_entity(node_raw: dict[str, Any]) -> Entity:
@@ -208,11 +229,42 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
             cwd=spec.cwd,
         )
 
+    if ntype == "tool":
+        spec = ToolNodeSpec.model_validate(node_raw)
+        return _build_tool_entity(nid, spec)
+
     if ntype == "python":
         spec = PythonNodeSpec.model_validate(node_raw)
         return _build_python_entity(nid, spec)
 
     raise ValueError(f"unknown node type: {ntype!r}")
+
+
+def _build_tool_entity(nid: str, spec: ToolNodeSpec) -> Entity:
+    """Build a ToolEntity by resolving `tool` within the chosen preset."""
+    from pharos.entities.tool_node import ToolEntity
+    from pharos.entities.tools import ToolRegistry
+
+    reg = ToolRegistry()
+    if spec.preset == "coding":
+        from pharos.entities.tools_coding import register_coding_tools
+
+        register_coding_tools(reg)
+    else:
+        from pharos.entities.tools_builtins import register_builtins
+
+        register_builtins(reg)
+    if not reg.has(spec.tool):
+        raise ValueError(
+            f"tool node {nid!r}: unknown tool {spec.tool!r} in preset "
+            f"{spec.preset!r} (have: {reg.tool_names()})"
+        )
+    return ToolEntity(
+        node_id=nid,
+        tool_name=spec.tool,
+        registry=reg,
+        arg_key=spec.arg_key,
+    )
 
 
 def _build_python_entity(nid: str, spec: PythonNodeSpec) -> Entity:
@@ -307,6 +359,7 @@ __all__ = [
     "LLMNodeSpec",
     "PythonNodeSpec",
     "ShellNodeSpec",
+    "ToolNodeSpec",
     "load_graph",
     "load_graph_from_dict",
     "load_graph_from_text",
