@@ -49,7 +49,7 @@ class LLMNodeSpec(BaseModel):
 
     id: str
     type: Literal["llm", "faux"] = "llm"
-    provider: Literal["openai", "glm", "faux"] = "openai"
+    provider: Literal["openai", "glm", "faux", "anthropic", "deepseek", "minimax"] = "openai"
     model: str
     system: str = ""
     temperature: float | None = None
@@ -129,7 +129,31 @@ _PROVIDER_CLASSES = {
     "openai": OpenAIProvider,
     "glm": GLMProvider,
     "faux": FauxProvider,
+    # Anthropic / DeepSeek / MiniMax are loaded from the registry
+    # at runtime, so we resolve them by string lookup below.
+    # See `_resolve_provider_class`.
 }
+
+
+def _resolve_provider_class(name: str) -> type:
+    """Resolve a provider name to a class.
+
+    Try the static map first; fall back to the registry. This lets
+    new providers (Anthropic / DeepSeek / MiniMax) work in YAML
+    without modifying this module.
+    """
+    if name in _PROVIDER_CLASSES:
+        return _PROVIDER_CLASSES[name]
+    # Lazy import to avoid circular dependencies
+    from pharos.llm.registry import get_provider_class, list_providers
+
+    cls = get_provider_class(name)
+    if cls is None:
+        raise ValueError(
+            f"unknown LLM provider: {name!r}. "
+            f"Known: {sorted(set(list(_PROVIDER_CLASSES) + list(list_providers())))}"
+        )
+    return cls
 
 
 def _build_entity(node_raw: dict[str, Any]) -> Entity:
@@ -141,7 +165,7 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
 
     if ntype in ("llm", "faux"):
         spec = LLMNodeSpec.model_validate(node_raw)
-        provider_class = _PROVIDER_CLASSES[spec.provider]
+        provider_class = _resolve_provider_class(spec.provider)
         # For faux, the model_id is just a hint; FauxProvider ignores it
         cfg = LLMEntityConfig(
             provider_class=provider_class,

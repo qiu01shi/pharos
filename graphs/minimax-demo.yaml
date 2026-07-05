@@ -1,0 +1,13 @@
+name: minimax-agent
+director: fn
+
+nodes:
+  - id: agent
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: "You are a helpful agent. Be concise."
+    max_tokens: 200
+edges:
+  - { src: __in__.prompt, dst: agent.prompt }
+  - { src: agent.text,    dst: __out__.response }

@@ -1,0 +1,32 @@
+name: minimax-with-tools
+director: fn
+
+nodes:
+  - id: agent
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: |
+      You can call tools to answer questions. When asked about time
+      or arithmetic, use the available tools. Reply concisely.
+    max_tokens: 400
+    tools:
+      - name: get_time
+        description: "Get the current UTC time as an ISO 8601 string."
+        parameters:
+          type: object
+          properties: {}
+          required: []
+      - name: add_numbers
+        description: "Add a list of numbers and return the sum as a string."
+        parameters:
+          type: object
+          properties:
+            numbers:
+              type: array
+              items: { type: number }
+              description: "Numbers to sum"
+          required: ["numbers"]
+edges:
+  - { src: __in__.prompt, dst: agent.prompt }
+  - { src: agent.text,    dst: __out__.response }

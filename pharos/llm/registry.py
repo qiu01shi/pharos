@@ -47,6 +47,7 @@ def _register_builtins() -> None:
     from pharos.llm.providers.deepseek import DeepSeekProvider
     from pharos.llm.providers.faux import FauxProvider
     from pharos.llm.providers.glm import GLMProvider
+    from pharos.llm.providers.minimax import MiniMaxProvider
     from pharos.llm.providers.openai import OpenAIProvider
 
     register_provider("faux", FauxProvider)
@@ -54,6 +55,7 @@ def _register_builtins() -> None:
     register_provider("glm", GLMProvider)
     register_provider("deepseek", DeepSeekProvider)
     register_provider("anthropic", AnthropicProvider)
+    register_provider("minimax", MiniMaxProvider)
 
 
 _register_builtins()
