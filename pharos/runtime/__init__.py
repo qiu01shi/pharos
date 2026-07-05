@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import asdict
@@ -125,46 +126,87 @@ def _extract_entity_output_text(span: dict[str, Any]) -> str:
 def extract_cached_outputs(run_id: str) -> dict[str, dict[str, Any]]:
     """Pull LLM-emitted text from the recorded trace.
 
-    Returns a dict mapping `(step_id, port_name)` → output payload.
-    Used by `pharos replay` to seed the same outputs without a
-    network call.
+    Returns a dict mapping `(node_id, step_index)` → dict of the
+    full recorded StreamEvent sequence + final message + usage.
+    Used by `pharos replay --re-run` to seed the same outputs
+    without a network call.
 
-    Step ids in pharos look like `<run_id>:N` (from FN/SDF
-    Director). Each step wraps an entity fire.
+    Each LLM step in the trace produces a sequence of StreamEvents
+    (text_delta, thinking_delta, toolcall_end, done). We capture
+    all of them so the ReplayProvider can replay the exact event
+    sequence.
+
+    The returned dict has shape:
+        {
+            "agent:1": {
+                "node_id": "agent",
+                "step_index": 1,
+                "events": [StreamEvent_dict, ...],   # full event list
+                "final_text": "...",                  # convenience
+                "usage": {...},                       # final usage dict
+                "model": "glm-4.5-air",
+                "provider": "glm",
+            },
+            ...
+        }
     """
     spans = get_run(run_id) or []
-    out: dict[str, dict[str, Any]] = {}
+    # Group by (node_id, step_index); a node can fire multiple
+    # times in a single run (SDF iterations).
+    by_key: dict[str, dict[str, Any]] = {}
     for s in spans:
         name = s.get("name", "")
         if not name.startswith("entity.fire."):
             continue
-        step_id = s.get("attributes", {}).get("step_id", "")
+        attrs = s.get("attributes", {})
+        node_id = attrs.get("entity", name.removeprefix("entity.fire."))
+        step_id = attrs.get("step_id", "")
+        # Step index: the trailing `:N` after `<run_id>:N`
+        step_index = 0
+        if ":" in step_id:
+            with contextlib.suppress(ValueError):
+                step_index = int(step_id.rsplit(":", 1)[-1])
+        # Class filter: only LLM-class entities are replay-able
+        cls = attrs.get("entity_class", "")
+        if cls != "LLMAgent":
+            continue
+
+        events: list[dict[str, Any]] = []
+        final_text = ""
+        usage_dict: dict[str, Any] = {}
+        model = ""
+        provider = ""
         for ev in s.get("events", []):
-            # Each event's payload (text_delta, thinking_delta,
-            # toolcall_end, etc.) — we focus on text content.
-            etype = ev.get("type", "")
-            if etype == "text_delta":
-                # Accumulate deltas
-                key = f"{step_id}.text"
-                out.setdefault(key, {"text": "", "model": "", "provider": ""})
-                out[key]["text"] += ev.get("delta", "") or ""
-            elif etype == "done":
-                # The done event carries the final AssistantMessage
-                msg = ev.get("message", {})
+            ename = ev.get("name", "")
+            ev_attrs = ev.get("attributes", {})
+            events.append({"type": ename, **ev_attrs})
+            if ename == "done":
+                msg = ev_attrs.get("message") or {}
                 if isinstance(msg, dict):
-                    # Concatenate text content blocks
-                    txt = ""
+                    parts = []
                     for b in msg.get("content", []):
                         if isinstance(b, dict) and b.get("text"):
-                            txt += b["text"]
-                    if txt:
-                        key = f"{step_id}.text"
-                        out[key] = {
-                            "text": txt,
-                            "model": msg.get("model", ""),
-                            "provider": msg.get("provider", ""),
-                        }
-    return out
+                            parts.append(b["text"])
+                    final_text = "".join(parts)
+                    model = msg.get("model", "")
+                    provider = msg.get("provider", "")
+                    u = msg.get("usage") or {}
+                    if isinstance(u, dict):
+                        usage_dict = u
+            elif ename == "text_delta":
+                final_text += str(ev_attrs.get("delta") or "")
+
+        key = f"{node_id}:{step_index}"
+        by_key[key] = {
+            "node_id": node_id,
+            "step_index": step_index,
+            "events": events,
+            "final_text": final_text,
+            "usage": usage_dict,
+            "model": model,
+            "provider": provider,
+        }
+    return by_key
 
 
 # ---------- P1/P2 functions (unchanged) ----------

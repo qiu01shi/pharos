@@ -254,13 +254,39 @@ def trace(
 def replay(
     run_id: str = typer.Argument(..., help="Run id to replay"),
     json_out: bool = typer.Option(False, "--json", help="Output JSON"),
+    re_run: bool = typer.Option(
+        False,
+        "--re-run",
+        help=(
+            "Re-execute the graph with recorded LLM outputs "
+            "(no network calls)"
+        ),
+    ),
+    graph: Path = typer.Option(
+        None,
+        "--graph",
+        "-g",
+        help="Path to the graph YAML (required for --re-run)",
+    ),
 ) -> None:
-    """Show every entity's emitted text from a recorded run.
+    """Inspect a recorded run, or re-execute it with cache replay.
 
-    This is a deterministic replay inspection — it does NOT re-execute
-    the graph; it extracts the final text each entity produced and
-    prints it in step order.
+    Without `--re-run`: show every entity's emitted text from the
+    recorded run (deterministic, no re-execution).
+
+    With `--re-run`: load the graph at `--graph`, swap LLM providers
+    for `ReplayProvider`, and run it. LLM calls return the same text
+    that was recorded — no network, no cost.
     """
+    if re_run:
+        if graph is None:
+            console.print(
+                "[red]--re-run requires --graph <path>[/red]"
+            )
+            raise typer.Exit(code=1)
+        asyncio.run(_replay_rerun(graph, run_id))
+        return
+
     from pharos.runtime import replay_run_summary
 
     summary = replay_run_summary(run_id)
@@ -297,6 +323,70 @@ def replay(
             out or "(no text)",
         )
     console.print(table)
+
+
+async def _replay_rerun(
+    graph: Path,
+    run_id: str,
+    seed_input: str = "",
+) -> None:
+    """Re-execute a graph using recorded LLM outputs as the cache.
+
+    Builds the graph normally, then walks nodes, swapping any
+    LLMAgent's provider for a ReplayProvider keyed by node_id.
+    """
+    from pharos.entities.llm import LLMAgent
+    from pharos.llm.providers.replay import ReplayProvider
+    from pharos.runtime import extract_cached_outputs
+
+    g, _raw = load_graph(graph)
+    cache = extract_cached_outputs(run_id)
+    if not cache:
+        console.print(
+            f"[yellow]No LLM outputs cached for run {run_id!r}[/yellow]"
+        )
+
+    # Seed: emit a placeholder prompt so the graph actually fires.
+    # ReplayProvider ignores the prompt text entirely (it replays
+    # cached output), so any value works.
+    _seed_input(g, seed_input or "(replay)")
+
+    # Walk all nodes; for any LLMAgent, swap its provider for a
+    # ReplayProvider keyed by node_id.
+    swap_count = 0
+    from pharos.llm.types import Model, ModelCost
+
+    replay_model = Model(
+        id="replay",
+        name="Replay (no network)",
+        api="replay",
+        provider="replay",
+        base_url="",
+        cost=ModelCost(input=0.0, output=0.0),
+        context_window=128_000,
+        max_tokens=8_192,
+    )
+    for node_id, node in g.nodes.items():
+        if node.instance is None:
+            continue
+        if not isinstance(node.instance, LLMAgent):
+            continue
+        # Replace the provider and model on the existing instance.
+        node.instance.provider = ReplayProvider(  # type: ignore[attr-defined]
+            node_id=node_id, cache=cache
+        )
+        node.instance.model = replay_model  # type: ignore[attr-defined]
+        # Skip the provider's setup() — ReplayProvider doesn't need
+        # any async initialization.
+        node.instance._initialized = True  # type: ignore[attr-defined]
+        swap_count += 1
+
+    console.print(
+        f"[cyan]Replaying run {run_id} with {swap_count} LLM agent(s) "
+        f"using cached outputs (no network).[/cyan]"
+    )
+    result, _ = await _run_with_trace(g, "fn", want_trace=True)
+    _print_summary(g, result, "fn")
 
 
 def _print_summary(g: CompositeGraph, result: Any, director_name: str = "fn") -> None:
