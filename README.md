@@ -17,31 +17,35 @@ From a YAML graph to a replayable, traced run:
 
 ```mermaid
 flowchart TD
-  yaml["YAML graph: nodes + typed edges"] -->|"load_graph (pharos/ir)"| g["CompositeGraph: entities + typed ports"]
-  g --> d["Director: FN / SDF / DE"]
+  yaml["YAML spec<br/>nodes + edges"] -->|load_graph| graph["CompositeGraph<br/>typed ports"]
+  graph --> director["Director<br/>FN / SDF / DE"]
 
-  subgraph fire [Per fire, via safe_fire]
-    direction LR
-    perm["PermissionPolicy check"] --> setup["setup() once"] --> span["open Trace span"] --> exec["entity.fire()"]
+  subgraph safeFire ["safe_fire per node"]
+    direction TB
+    rbac["PermissionPolicy<br/>RBAC check"]
+    setup["setup()<br/>once"]
+    span["Trace span"]
+    fire["entity.fire()"]
+    rbac --> setup --> span --> fire
   end
-  d --> fire
+  director --> rbac
 
-  exec --> llm["LLMAgent: provider + tool loop"]
-  exec --> tool["ToolEntity"]
-  exec --> shell["ShellEntity"]
-  exec --> sub["SubgraphEntity: nested Director"]
-  exec --> retry["RetryEntity: backoff"]
+  fire --> llm["LLMAgent<br/>provider + tools"]
+  fire --> toolN["ToolEntity"]
+  fire --> shellN["ShellEntity"]
+  fire --> subN["SubgraphEntity<br/>nested graph"]
+  fire --> retryN["RetryEntity<br/>backoff retry"]
 
-  llm --> tk["Tokens (hash-chained) + Spans"]
-  tool --> tk
-  shell --> tk
-  sub --> tk
-  retry --> tk
+  llm --> tokens["Tokens + Spans<br/>hash-chained"]
+  toolN --> tokens
+  shellN --> tokens
+  subN --> tokens
+  retryN --> tokens
 
-  tk -->|persist| runs["~/.pharos/runs/id.json (spans + outputs)"]
-  runs --> rr["replay --re-run (no network)"]
-  runs --> tui["trace -i (TUI tree)"]
-  runs --> otlp["trace --otlp (OTLP/JSON)"]
+  tokens -->|persist| store["Run record<br/>~/.pharos/runs/"]
+  store --> replay["replay<br/>--re-run"]
+  store --> tui["trace -i<br/>TUI tree"]
+  store --> otlp["trace --otlp<br/>OTLP JSON"]
 ```
 
 Every node fires through one shared `safe_fire` path, so RBAC, tracing, and
@@ -53,18 +57,18 @@ sequenceDiagram
   participant SF as safe_fire
   participant PP as PermissionPolicy
   participant E as Entity
-  participant P as Provider/Tool
-  participant R as Recorder/Tracer
-  D->>SF: fire(entity, fire_ctx, run_ctx)
-  SF->>PP: check(required_permissions)
-  SF->>E: setup() first time only
+  participant P as Provider
+  participant R as Tracer
+  D->>SF: schedule fire
+  SF->>PP: check permissions
+  SF->>E: setup once
   SF->>R: open span
-  SF->>E: fire(ctx)
-  E->>P: call (LLM / tool / shell)
+  SF->>E: fire
+  E->>P: LLM / tool / shell
   P-->>E: output tokens
-  E-->>SF: emit on output ports
-  SF->>R: record outputs + close span
-  SF-->>D: metrics (tokens, cost)
+  E-->>SF: emit ports
+  SF->>R: record + close span
+  SF-->>D: tokens + cost
 ```
 
 ### Layered design
