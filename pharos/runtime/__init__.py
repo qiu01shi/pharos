@@ -327,15 +327,24 @@ class RunReplayer:
     commands, python entities, and tools too — not only LLM calls.
     """
 
-    def __init__(self, data: dict[str, list[dict[str, Any]]]) -> None:
+    def __init__(
+        self, data: dict[str, list[dict[str, Any]]], resume: bool = False
+    ) -> None:
         self._data = data
+        # Resume mode: fires WITHOUT a recorded output run live instead of
+        # emitting nothing. This turns a full-run replayer into a "continue
+        # from where recording stopped" checkpoint — completed fires replay
+        # cheaply, remaining fires execute for real.
+        self.resume = resume
 
     @classmethod
-    def load(cls, run_id: str) -> RunReplayer | None:
+    def load(
+        cls, run_id: str, resume: bool = False
+    ) -> RunReplayer | None:
         outputs = get_run_outputs(run_id)
         if not outputs:
             return None
-        return cls(outputs)
+        return cls(outputs, resume=resume)
 
     def has(self, node_id: str, fire_index: int) -> bool:
         return f"{node_id}:{fire_index}" in self._data

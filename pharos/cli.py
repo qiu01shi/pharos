@@ -17,7 +17,7 @@ from pharos import __version__
 from pharos.core.graph import CompositeGraph
 from pharos.core.token import TypedValue
 from pharos.directors import make_director
-from pharos.directors.base import RunContext
+from pharos.directors.base import RunBudget, RunContext
 from pharos.ir import load_graph, load_graph_from_text
 from pharos.observability.backend.console import ConsoleTraceBackend
 from pharos.observability.trace import InMemoryTracer
@@ -91,6 +91,20 @@ def run(
     converge_k: int = typer.Option(
         2, "--converge-k", help="Convergence K (SDF only)"
     ),
+    max_cost: float | None = typer.Option(
+        None, "--max-cost", help="Abort the run above this USD cost"
+    ),
+    max_tokens: int | None = typer.Option(
+        None, "--max-tokens", help="Abort the run above this token count"
+    ),
+    budget_mode: str = typer.Option(
+        "hard", "--budget-mode", help="Budget enforcement: 'hard' or 'soft'"
+    ),
+    answer: list[str] = typer.Option(
+        [],
+        "--answer",
+        help="Preset a human node's answer as node=value (repeatable)",
+    ),
 ) -> None:
     """Load a graph and run it once with --input as the initial prompt."""
     raw_text = _substitute_vars(graph, var)
@@ -109,7 +123,9 @@ def run(
         k, _, v = item.partition("=")
         seed_map[k.strip()] = v
     _seed_inputs(g, seed_map)
+    _apply_answers(g, answer)
     director_name = raw.get("director", "fn")
+    budget = _build_budget(raw.get("budget"), max_cost, max_tokens, budget_mode)
     result, _backend = asyncio.run(
         _run_with_trace(
             g,
@@ -118,6 +134,7 @@ def run(
             max_iters,
             converge_k,
             granted_permissions=set(grant),
+            budget=budget,
         )
     )
     if json_out:
@@ -188,6 +205,39 @@ def _which_version(cmd: str) -> str | None:
 
 
 # ---------- helpers ----------
+
+
+def _build_budget(
+    raw_budget: Any,
+    max_cost: float | None,
+    max_tokens: int | None,
+    mode: str,
+) -> RunBudget | None:
+    """Merge a graph `budget:` block with CLI overrides (CLI wins)."""
+    rb = raw_budget if isinstance(raw_budget, dict) else {}
+    cost = max_cost if max_cost is not None else rb.get("max_cost_usd")
+    toks = max_tokens if max_tokens is not None else rb.get("max_tokens")
+    final_mode = mode or rb.get("mode", "hard")
+    if cost is None and toks is None:
+        return None
+    return RunBudget(
+        max_tokens=toks, max_cost_usd=cost, mode=final_mode
+    )
+
+
+def _apply_answers(g: CompositeGraph, answers: list[str]) -> None:
+    """Apply `--answer node=value` to HumanEntity instances by node id."""
+    for item in answers:
+        if "=" not in item:
+            console.print(
+                f"[red]Invalid --answer (expected node=value): {item!r}[/red]"
+            )
+            raise typer.Exit(code=1)
+        node_id, _, value = item.partition("=")
+        node = g.nodes.get(node_id.strip())
+        inst = node.instance if node is not None else None
+        if inst is not None and hasattr(inst, "answer"):
+            inst.answer = value
 
 
 def _seed_input(g: CompositeGraph, text: str) -> None:
@@ -275,19 +325,23 @@ async def _run_with_trace(
     converge_k: int = 2,
     granted_permissions: set[str] | None = None,
     replayer: Any = None,
+    budget: RunBudget | None = None,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
     from pharos.runtime import RunRecorder, record_run
 
     tracer = InMemoryTracer()
     backend = ConsoleTraceBackend() if want_trace else None
-    # Record entity outputs only for live runs (not when replaying).
-    recorder = RunRecorder() if replayer is None else None
+    # Record entity outputs for live runs and for resume (so the resumed run
+    # is itself a complete, replayable recording). Pure replay does not record.
+    resume_mode = replayer is not None and getattr(replayer, "resume", False)
+    recorder = RunRecorder() if (replayer is None or resume_mode) else None
     ctx = RunContext(
         run_id=str(uuid.uuid4()),
         granted_permissions=granted_permissions or set(),
         tracer=tracer,
         recorder=recorder,
         replayer=replayer,
+        budget=budget,
     )
 
     d = make_director(
@@ -305,7 +359,75 @@ async def _run_with_trace(
         outputs=recorder.to_dict() if recorder is not None else None,
         director=director_name,
     )
+    await _index_run_sqlite(ctx.run_id, tracer.spans, director_name, result)
     return result, backend
+
+
+async def _index_run_sqlite(
+    run_id: str, spans: Any, director_name: str, result: Any
+) -> None:
+    """Index a finished run into SQLite for `pharos trace query`.
+
+    Best-effort: a trace-store failure must never fail the run itself.
+    """
+    import contextlib
+    from datetime import datetime
+
+    with contextlib.suppress(Exception):
+        from pharos.observability.backend.sqlite import SQLiteTraceBackend
+
+        error = getattr(result, "error", None)
+        await SQLiteTraceBackend().index_run(
+            run_id,
+            list(spans),
+            director=director_name,
+            total_tokens=getattr(result, "tokens_emitted", 0) or 0,
+            total_cost=getattr(result, "cost_usd", 0.0) or 0.0,
+            status="error" if error else "ok",
+            error=error,
+            recorded_at=datetime.now().isoformat(),
+        )
+
+
+def _trace_query(
+    entity: str | None,
+    since: str | None,
+    min_cost: float | None,
+    limit: int,
+) -> None:
+    """Query the SQLite run index (`pharos trace query ...`)."""
+    from pharos.observability.backend.sqlite import SQLiteTraceBackend
+
+    rows = asyncio.run(
+        SQLiteTraceBackend().query_runs(
+            entity=entity, since=since, min_cost=min_cost, limit=limit
+        )
+    )
+    if not rows:
+        console.print("[yellow]No runs match this query.[/yellow]")
+        console.print(
+            "Runs are indexed as they complete; run something first."
+        )
+        return
+    table = Table(title="Run history (SQLite index)")
+    table.add_column("run_id", style="cyan")
+    table.add_column("recorded_at", style="dim")
+    table.add_column("director")
+    table.add_column("status")
+    table.add_column("tokens", justify="right")
+    table.add_column("cost", justify="right")
+    for r in rows:
+        status = r.get("status", "")
+        colour = "red" if status == "error" else "green"
+        table.add_row(
+            str(r.get("run_id", ""))[:32],
+            str(r.get("recorded_at", ""))[:19],
+            str(r.get("director", "")),
+            f"[{colour}]{status}[/{colour}]",
+            str(r.get("total_tokens", 0)),
+            f"${r.get('total_cost_usd', 0.0):.4f}",
+        )
+    console.print(table)
 
 
 @app.command()
@@ -322,9 +444,25 @@ def trace(
         "--otlp",
         help="Export the run's spans as OTLP/JSON to this path instead of printing",
     ),
+    entity: str | None = typer.Option(
+        None, "--entity", help="[query] filter to runs containing this entity"
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="[query] ISO timestamp lower bound (recorded_at)"
+    ),
+    min_cost: float | None = typer.Option(
+        None, "--min-cost", help="[query] only runs at/above this USD cost"
+    ),
+    limit: int = typer.Option(
+        50, "--limit", help="[query] max rows to return"
+    ),
 ) -> None:
-    """Show a recorded run's trace tree."""
+    """Show a recorded run's trace tree (or `pharos trace query ...`)."""
     from pharos.runtime import get_run, list_runs
+
+    if run_id == "query":
+        _trace_query(entity, since, min_cost, limit)
+        return
 
     if run_id == "list":
         # Convenience: `pharos trace list`
@@ -461,6 +599,69 @@ def replay(
             out or "(no text)",
         )
     console.print(table)
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Run id to resume from"),
+    graph: Path = typer.Option(
+        ..., "--graph", "-g", help="Path to the graph YAML"
+    ),
+    input: str = typer.Option(
+        "", "--input", "-i", help="Prompt for `__in__.prompt` (for live fires)"
+    ),
+    input_extra: list[str] = typer.Option(
+        [], "--input-extra", help="Extra seed as port=value (repeatable)"
+    ),
+    grant: list[str] = typer.Option(
+        [], "--grant", help="Permission to grant live fires (repeatable)"
+    ),
+    answer: list[str] = typer.Option(
+        [],
+        "--answer",
+        help="Preset a human node's answer as node=value (repeatable)",
+    ),
+) -> None:
+    """Continue a partially-recorded run: replay completed fires, run the rest.
+
+    Fires that were recorded in `run_id` are re-emitted from the cache (no
+    network, no cost); fires that were never reached execute live. Useful to
+    pick up a long run that failed or was interrupted part-way.
+    """
+    from pharos.runtime import RunReplayer, get_run_director
+
+    replayer = RunReplayer.load(run_id, resume=True)
+    if replayer is None:
+        console.print(f"[red]No recorded outputs for run {run_id!r}[/red]")
+        console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
+        raise typer.Exit(code=1)
+
+    g, raw = load_graph(graph)
+    seed_map: dict[str, str] = {}
+    if input:
+        seed_map["prompt"] = input
+    for item in input_extra:
+        if "=" in item:
+            k, _, v = item.partition("=")
+            seed_map[k.strip()] = v
+    _seed_inputs(g, seed_map)
+    _apply_answers(g, answer)
+
+    director_name = get_run_director(run_id) or raw.get("director", "fn")
+    console.print(
+        f"[cyan]Resuming run {run_id}: recorded fires replay, the rest run "
+        f"live (director={director_name}).[/cyan]"
+    )
+    result, _ = asyncio.run(
+        _run_with_trace(
+            g,
+            director_name,
+            want_trace=True,
+            granted_permissions=set(grant),
+            replayer=replayer,
+        )
+    )
+    _print_summary(g, result, director_name)
 
 
 async def _replay_rerun(

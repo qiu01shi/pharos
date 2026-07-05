@@ -273,6 +273,15 @@ class OpenAIProvider(LLMProvider):
                 # OpenAI reasoning models only support "minimal"/"low"/"medium"/"high"
                 if effort in ("minimal", "low", "medium", "high"):
                     body["reasoning"] = {"effort": effort}
+            if options.response_schema is not None:
+                # Responses API structured output lives under text.format.
+                body["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "pharos_response",
+                        "schema": options.response_schema,
+                    }
+                }
         usage = Usage()
         text_buf = ""
         tool_calls: dict[str, dict[str, Any]] = {}
@@ -407,6 +416,14 @@ class OpenAIProvider(LLMProvider):
                 body["temperature"] = options.temperature
             if options.max_tokens:
                 body["max_tokens"] = options.max_tokens
+            if options.response_schema is not None:
+                body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "pharos_response",
+                        "schema": options.response_schema,
+                    },
+                }
         usage = Usage()
         text_buf = ""
         tool_calls: dict[str, dict[str, Any]] = {}

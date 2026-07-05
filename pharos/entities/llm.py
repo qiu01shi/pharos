@@ -12,11 +12,13 @@ Behavior:
 
 from __future__ import annotations
 
+import json as _json
 from dataclasses import dataclass
 from typing import Any
 
 from pharos.core.entity import Entity, entity
-from pharos.core.port import InputPort, OutputPort
+from pharos.core.port import InputPort, OutputPort, PortContractViolation
+from pharos.core.schema import validate as _validate_schema
 from pharos.core.token import TypedValue
 from pharos.llm.base import LLMProvider
 from pharos.llm.types import (
@@ -54,6 +56,14 @@ class LLMEntityConfig:
     # provider's tool-spec protocol.
     tool_registry: Any = None  # pharos.entities.tools.ToolRegistry
     max_tool_iterations: int = 5
+    # Structured output: when set, the LLM is steered to emit JSON matching
+    # this JSON Schema (subset), the result is validated, and the parsed
+    # object is emitted on the `json` port. `on_invalid` decides what happens
+    # when the response doesn't parse/validate:
+    #   "raise"      -> raise PortContractViolation (composes with RetryEntity)
+    #   "error_port" -> emit the failure message on the `error` port instead
+    output_schema: dict[str, Any] | None = None
+    on_invalid: str = "raise"
 
     def __post_init__(self) -> None:
         if self.tools is None:
@@ -74,6 +84,10 @@ class LLMAgent(Entity):
             thinking: TextPort     — thinking/reasoning (if model emits any)
             tool_calls: JsonPort   — list of ToolCall (if model emits any)
             usage: JsonPort        — Usage object
+            json: JsonPort         — validated structured output
+                                     (only when output_schema is configured)
+            error: TextPort        — validation failure message
+                                     (only when on_invalid == "error_port")
     """
 
     ins = {
@@ -88,6 +102,12 @@ class LLMAgent(Entity):
         "thinking": OutputPort(name="thinking", accepted_types=["text"]),
         "tool_calls": OutputPort(name="tool_calls", accepted_types=["json"]),
         "usage": OutputPort(name="usage", accepted_types=["json"]),
+        # Structured output: the validated, parsed JSON object (only emitted
+        # when `output_schema` is configured). Its schema is bound per-instance
+        # in __init__ so the port itself enforces the shape on emit.
+        "json": OutputPort(name="json", accepted_types=["json"]),
+        # Validation failures land here when `on_invalid == "error_port"`.
+        "error": OutputPort(name="error", accepted_types=["text"]),
     }
 
     def __init__(
@@ -97,6 +117,10 @@ class LLMAgent(Entity):
     ) -> None:
         super().__init__(node_id=node_id)
         self.config = config
+        # Bind the declared output schema to the `json` port so the port
+        # boundary enforces the shape (defense in depth alongside fire()).
+        if config.output_schema is not None:
+            self.outs["json"].schema = config.output_schema
         self.provider: LLMProvider | None = None
         self.model: Model | None = None
         # Cumulative token count and cost across all fire() invocations.
@@ -143,6 +167,17 @@ class LLMAgent(Entity):
         if sys_override:
             system_prompt = "".join(t.value.payload for t in sys_override)
 
+        # Structured output: steer every provider (including ones without
+        # native JSON-schema enforcement) by appending a schema instruction.
+        if self.config.output_schema is not None:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "You must respond with a single JSON value that conforms to "
+                "this JSON Schema. Output only the JSON — no prose, no "
+                "markdown code fences:\n"
+                f"{_json.dumps(self.config.output_schema)}"
+            ).strip()
+
         # Build the tool spec. ToolRegistry.list_tools() returns
         # list[Tool] (pharos.llm.types.Tool), which is what
         # Context.tools and providers expect.
@@ -160,6 +195,7 @@ class LLMAgent(Entity):
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             thinking_level=self.config.thinking_level,  # type: ignore[arg-type]
+            response_schema=self.config.output_schema,
         )
 
         # Accumulators across all LLM calls in this fire()
@@ -308,11 +344,14 @@ class LLMAgent(Entity):
                         is_error=result.is_error,
                     )
                 )
-        # Final outputs
+        # Final outputs. The raw text is always emitted (useful for tracing
+        # and debugging); structured output is emitted separately on `json`.
         if accumulated:
             self.outs["text"].emit(
                 TypedValue(type="text", payload=accumulated)
             )
+        if self.config.output_schema is not None:
+            self._emit_structured(accumulated)
         if accumulated_thinking:
             self.outs["thinking"].emit(
                 TypedValue(type="text", payload=accumulated_thinking)
@@ -352,6 +391,70 @@ class LLMAgent(Entity):
         cost = (total_usage.input * self.model.cost.input
                 + total_usage.output * self.model.cost.output) / 1_000_000
         self.total_cost += cost
+
+    def _emit_structured(self, text: str) -> None:
+        """Parse `text` as JSON, validate against the schema, and route it.
+
+        On success the parsed object is emitted on the `json` port (which
+        re-validates the shape as a boundary guarantee). On failure the
+        behaviour follows `config.on_invalid`:
+          * "raise"      -> raise PortContractViolation so a wrapping
+            RetryEntity can re-fire, or the Director marks the run failed.
+          * "error_port" -> emit the failure message on the `error` port,
+            letting a downstream Router branch on it.
+        """
+        assert self.config.output_schema is not None
+        reason: str
+        parsed: Any = None
+        try:
+            parsed = self._extract_json(text)
+        except ValueError as exc:
+            reason = str(exc)
+        else:
+            errors = _validate_schema(parsed, self.config.output_schema)
+            reason = "; ".join(errors)
+
+        if not reason:
+            self.outs["json"].emit(TypedValue(type="json", payload=parsed))
+            return
+
+        message = f"structured output invalid: {reason}"
+        if self.config.on_invalid == "error_port":
+            self.outs["error"].emit(TypedValue(type="text", payload=message))
+            return
+        raise PortContractViolation(f"{self.node_id}: {message}")
+
+    @staticmethod
+    def _extract_json(text: str) -> Any:
+        """Best-effort extraction of a JSON value from LLM text.
+
+        Handles bare JSON, ```json fenced blocks, and prose that wraps a
+        single JSON object/array. Raises ValueError if nothing parses.
+        """
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            # Drop the opening fence line (```; ```json) and trailing fence.
+            lines = candidate.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            candidate = "\n".join(lines).strip()
+        try:
+            return _json.loads(candidate)
+        except (ValueError, TypeError):
+            pass
+        # Fallback: slice from the first opening bracket to the last matching
+        # closing bracket and retry.
+        for open_ch, close_ch in (("{", "}"), ("[", "]")):
+            start = candidate.find(open_ch)
+            end = candidate.rfind(close_ch)
+            if start != -1 and end > start:
+                try:
+                    return _json.loads(candidate[start : end + 1])
+                except (ValueError, TypeError):
+                    continue
+        raise ValueError("response is not valid JSON")
 
     async def _stream_one_round(
         self,

@@ -67,6 +67,7 @@ class RetryEntity(Entity):
                 accepted_types=list(p.accepted_types),
                 capacity=p.capacity,
                 overflow=p.overflow,
+                schema=p.schema,
             )
             for name, p in inner.ins.items()
         }
@@ -76,6 +77,7 @@ class RetryEntity(Entity):
                 accepted_types=list(p.accepted_types),
                 capacity=p.capacity,
                 overflow=p.overflow,
+                schema=p.schema,
             )
             for name, p in inner.outs.items()
         }

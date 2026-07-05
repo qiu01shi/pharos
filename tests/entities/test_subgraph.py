@@ -222,3 +222,49 @@ class TestIRSubgraphRef:
         )
         with pytest.raises(ValueError, match="circular subgraph reference"):
             load_graph(tmp_path / "a.yaml")
+
+    def _child_and_parent(self, tmp_path, ref_line: str):
+        from pharos.ir import _file_sha256, load_graph
+
+        child = self._write(
+            tmp_path,
+            "child.yaml",
+            "name: child\ndirector: fn\n"
+            "nodes:\n  - {id: a, type: faux, provider: faux, model: faux-fast}\n"
+            "edges:\n"
+            "  - { src: __in__.prompt, dst: a.prompt }\n"
+            "  - { src: a.text, dst: __out__.result }\n",
+        )
+        parent = self._write(
+            tmp_path,
+            "parent.yaml",
+            "name: parent\ndirector: fn\n"
+            f"nodes:\n  - {{id: sub, type: subgraph, ref: child.yaml{ref_line}}}\n"
+            "edges:\n"
+            "  - { src: __in__.prompt, dst: sub.prompt }\n"
+            "  - { src: sub.result, dst: __out__.out }\n",
+        )
+        return _file_sha256(child), parent, load_graph
+
+    def test_ref_sha_matches(self, tmp_path):
+        sha, parent, load_graph = self._child_and_parent(
+            tmp_path, ", ref_sha: __PLACEHOLDER__"
+        )
+        # Rewrite the parent with the real hash prefix now that we know it.
+        parent.write_text(
+            parent.read_text(encoding="utf-8").replace(
+                "__PLACEHOLDER__", sha[:16]
+            ),
+            encoding="utf-8",
+        )
+        g, _ = load_graph(parent)
+        from pharos.entities.subgraph import SubgraphEntity
+
+        assert isinstance(g.node("sub").instance, SubgraphEntity)
+
+    def test_ref_sha_mismatch_rejected(self, tmp_path):
+        _sha, parent, load_graph = self._child_and_parent(
+            tmp_path, ", ref_sha: deadbeefdeadbeef"
+        )
+        with pytest.raises(ValueError, match="does not match pinned ref_sha"):
+            load_graph(parent)

@@ -23,6 +23,7 @@ or set the seed via a real Entity in your test (see FNDirector docs).
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 from pathlib import Path
 from typing import Any, Literal
@@ -64,6 +65,13 @@ class LLMNodeSpec(BaseModel):
     #              "none" (default) = no tools
     tools: Literal["none", "coding", "builtin"] = "none"
     max_tool_iterations: int = 5
+    # Structured output: a JSON Schema (subset) the response must match. When
+    # set, the validated object is emitted on the node's `json` port.
+    output_schema: dict[str, Any] | None = None
+    # What to do when the response fails to parse/validate:
+    #   "raise"      -> fail the fire (pairs with a `retry:` block to re-try)
+    #   "error_port" -> emit the message on the `error` port for a Router
+    on_invalid: Literal["raise", "error_port"] = "raise"
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -113,6 +121,11 @@ class SubgraphNodeSpec(BaseModel):
     outputs: dict[str, str] | None = None
     max_iters: int = 20
     converge_k: int = 2
+    # Optional integrity pin: sha256 (hex, full or prefix) of the referenced
+    # file's bytes. When set, loading fails if the referenced graph changed —
+    # so a recorded run's replay can't silently drift when a subgraph is
+    # edited out from under it.
+    ref_sha: str | None = None
 
 
 class RetrySpec(BaseModel):
@@ -126,6 +139,22 @@ class RetrySpec(BaseModel):
 
     max_attempts: int = 3
     backoff_s: float = 0.0
+
+
+class HumanNodeSpec(BaseModel):
+    """Configuration for a `type: human` node — pause for human input.
+
+    Example:
+        - id: approve
+          type: human
+          answer: "yes"        # optional preset (else the run pauses)
+          interactive: false   # prompt on the terminal when stdin is a TTY
+    """
+
+    id: str
+    type: Literal["human"] = "human"
+    answer: str | None = None
+    interactive: bool = False
 
 
 class PythonNodeSpec(BaseModel):
@@ -167,11 +196,24 @@ class EdgeSpec(BaseModel):
     dst: str
 
 
+class BudgetSpec(BaseModel):
+    """Optional graph-level `budget:` block — a run-wide spend cap.
+
+    Example:
+        budget: { max_cost_usd: 0.50, max_tokens: 100000, mode: hard }
+    """
+
+    max_tokens: int | None = None
+    max_cost_usd: float | None = None
+    mode: Literal["hard", "soft"] = "hard"
+
+
 class GraphSpec(BaseModel):
     name: str = "graph"
     director: DirectorName = "fn"
     nodes: list[dict[str, Any]]
     edges: list[EdgeSpec] = Field(default_factory=list)
+    budget: BudgetSpec | None = None
 
     @field_validator("nodes")
     @classmethod
@@ -253,6 +295,8 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
             thinking_level=llm_spec.thinking_level,
             tool_registry=tool_registry,
             max_tool_iterations=llm_spec.max_tool_iterations,
+            output_schema=llm_spec.output_schema,
+            on_invalid=llm_spec.on_invalid,
         )
         return LLMAgent(node_id=nid, config=cfg)
 
@@ -267,6 +311,16 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
     if ntype == "tool":
         tool_spec = ToolNodeSpec.model_validate(node_raw)
         return _build_tool_entity(nid, tool_spec)
+
+    if ntype == "human":
+        from pharos.entities.human import HumanEntity
+
+        human_spec = HumanNodeSpec.model_validate(node_raw)
+        return HumanEntity(
+            node_id=nid,
+            answer=human_spec.answer,
+            interactive=human_spec.interactive,
+        )
 
     if ntype == "python":
         py_spec = PythonNodeSpec.model_validate(node_raw)
@@ -333,6 +387,11 @@ def _build_python_entity(nid: str, spec: PythonNodeSpec) -> Entity:
         return cls(node_id=nid)
 
 
+def _file_sha256(path: Path) -> str:
+    """Return the hex sha256 of a file's raw bytes (for ref-integrity pins)."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _add_subgraph_node(
     parent: CompositeGraph,
     node_raw: dict[str, Any],
@@ -353,6 +412,14 @@ def _add_subgraph_node(
                 f"(or pass base_dir) so refs can be resolved"
             )
         ref = base_dir / ref
+    if spec.ref_sha is not None:
+        actual = _file_sha256(ref)
+        if not actual.startswith(spec.ref_sha.lower()):
+            raise ValueError(
+                f"subgraph node {spec.id!r}: ref {spec.ref!r} sha256 "
+                f"{actual[:16]}... does not match pinned ref_sha "
+                f"{spec.ref_sha!r} (the referenced graph changed)"
+            )
     child_graph, child_raw = load_graph(ref, _loading=loading)
     director = spec.director or child_raw.get("director", "fn")
     parent.add_subgraph(
@@ -463,8 +530,10 @@ def load_graph(
 
 
 __all__ = [
+    "BudgetSpec",
     "EdgeSpec",
     "GraphSpec",
+    "HumanNodeSpec",
     "LLMNodeSpec",
     "PythonNodeSpec",
     "RetrySpec",
