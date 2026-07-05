@@ -1,0 +1,12 @@
+name: de-demo
+director: de
+nodes:
+  - id: agent
+    type: faux
+    provider: faux
+    model: faux-fast
+    system: "Reply briefly."
+    max_tokens: 50
+edges:
+  - { src: __in__.prompt, dst: agent.prompt }
+  - { src: agent.text,    dst: __out__.response }

@@ -82,7 +82,7 @@ pharos run hello.yaml --input "hi there"
 
 ## Current status
 
-**P0–P3 done.**
+**P0–P4 done.**
 
 | Phase | What | Status |
 | --- | --- | --- |
@@ -90,17 +90,18 @@ pharos run hello.yaml --input "hi there"
 | **P1** | OpenAI + GLM providers, YAML IR, CLI, trace persistence | ✅ |
 | **P2** | Anthropic + DeepSeek providers, Router + Memory entities, SDF Director (feedback loops) | ✅ |
 | **P3** | Custom Python entities from YAML, deterministic replay inspection | ✅ |
-| **P4+** | DE / PN / CT directors, real Replay, TUI viewer | pending |
+| **P4** | DE Director (trigger-driven firing) | ✅ |
+| **P5+** | PN / CT directors, real byte-equal Replay, TUI viewer | pending |
 
 **Numbers**:
-- 204 tests, 0 lint errors
-- 100 concurrent actors: P95 ≈ 12ms (target 2000ms)
+- 209 tests, 0 lint errors
+- 100 concurrent actors: P95 ≈ 11ms (target 2000ms)
 - 5 LLM providers: faux / glm / openai / deepseek / anthropic
-- 2 Directors: FN / SDF
+- 3 Directors: FN / SDF / DE
 - 5 Entities: LLMAgent / ShellEntity / Router / Memory / (custom Python)
 - 6 CLI subcommands: run / validate / list-providers / doctor / trace / replay
 
-See [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md), [P1](docs/P1-COMPLETE.md), [P2](docs/P2-COMPLETE.md), [P3](docs/P3-COMPLETE.md).
+See [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md), [P1](docs/P1-COMPLETE.md), [P2](docs/P2-COMPLETE.md), [P3](docs/P3-COMPLETE.md), [P4](docs/P4-COMPLETE.md).
 
 ## Project layout
 

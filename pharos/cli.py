@@ -17,6 +17,7 @@ from pharos import __version__
 from pharos.core.graph import CompositeGraph
 from pharos.core.token import TypedValue
 from pharos.directors.base import RunContext
+from pharos.directors.de import DEDirector
 from pharos.directors.fn import FNDirector
 from pharos.directors.sdf import SDFDirector
 from pharos.ir import load_graph
@@ -180,6 +181,8 @@ async def _run_with_trace(
 
     if director_name == "sdf":
         d = SDFDirector(max_iterations=max_iters, convergence_k=converge_k)
+    elif director_name == "de":
+        d = DEDirector(max_iterations=max_iters)
     else:
         d = FNDirector()
 

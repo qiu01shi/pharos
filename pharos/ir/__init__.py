@@ -38,7 +38,7 @@ from pharos.llm.providers.faux import FauxConfig, FauxProvider  # noqa: F401
 from pharos.llm.providers.glm import GLMProvider
 from pharos.llm.providers.openai import OpenAIProvider
 
-DirectorName = Literal["fn", "sdf"]  # DE/PN/CT added in later phases
+DirectorName = Literal["fn", "sdf", "de"]  # PN/CT added in later phases
 
 
 # ---------- node specs ----------
