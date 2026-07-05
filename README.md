@@ -17,35 +17,35 @@ From a YAML graph to a replayable, traced run:
 
 ```mermaid
 flowchart TD
-  yaml["YAML spec<br/>nodes + edges"] -->|load_graph| graph["CompositeGraph<br/>typed ports"]
-  graph --> director["Director<br/>FN / SDF / DE"]
+  yamlSpec["YAML spec<br/>nodes + edges"] -->|load_graph| composite["CompositeGraph<br/>typed ports"]
+  composite --> director["Director<br/>FN / SDF / DE"]
 
   subgraph safeFire ["safe_fire per node"]
     direction TB
     rbac["PermissionPolicy<br/>RBAC check"]
-    setup["setup()<br/>once"]
-    span["Trace span"]
-    fire["entity.fire()"]
-    rbac --> setup --> span --> fire
+    setupOnce["setup()<br/>once"]
+    traceSpan["Trace span"]
+    doFire["entity.fire()"]
+    rbac --> setupOnce --> traceSpan --> doFire
   end
   director --> rbac
 
-  fire --> llm["LLMAgent<br/>provider + tools"]
-  fire --> toolN["ToolEntity"]
-  fire --> shellN["ShellEntity"]
-  fire --> subN["SubgraphEntity<br/>nested graph"]
-  fire --> retryN["RetryEntity<br/>backoff retry"]
+  doFire --> llm["LLMAgent<br/>provider + tools"]
+  doFire --> toolN["ToolEntity"]
+  doFire --> shellN["ShellEntity"]
+  doFire --> subN["SubgraphEntity<br/>nested graph"]
+  doFire --> retryN["RetryEntity<br/>backoff retry"]
 
-  llm --> tokens["Tokens + Spans<br/>hash-chained"]
-  toolN --> tokens
-  shellN --> tokens
-  subN --> tokens
-  retryN --> tokens
+  llm --> outTokens["Tokens + Spans<br/>hash-chained"]
+  toolN --> outTokens
+  shellN --> outTokens
+  subN --> outTokens
+  retryN --> outTokens
 
-  tokens -->|persist| store["Run record<br/>~/.pharos/runs/"]
-  store --> replay["replay<br/>--re-run"]
-  store --> tui["trace -i<br/>TUI tree"]
-  store --> otlp["trace --otlp<br/>OTLP JSON"]
+  outTokens -->|persist| runStore["Run record<br/>~/.pharos/runs/"]
+  runStore --> replayCmd["replay<br/>--re-run"]
+  runStore --> tuiCmd["trace -i<br/>TUI tree"]
+  runStore --> otlpCmd["trace --otlp<br/>OTLP JSON"]
 ```
 
 Every node fires through one shared `safe_fire` path, so RBAC, tracing, and
