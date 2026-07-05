@@ -196,8 +196,20 @@ class LLMAgent(Entity):
                 accumulated_thinking += think_delta
             if round_text_final and not accumulated:
                 accumulated = round_text_final
+            # Accumulate usage across every round of the tool-call loop.
+            # Usage is frozen, so build a new summed instance each round —
+            # otherwise multi-turn tool loops would only report the LAST
+            # round's tokens/cost.
             if round_usage.input or round_usage.output:
-                total_usage = round_usage
+                total_usage = Usage(
+                    input=total_usage.input + round_usage.input,
+                    output=total_usage.output + round_usage.output,
+                    cache_read=total_usage.cache_read + round_usage.cache_read,
+                    cache_write=total_usage.cache_write + round_usage.cache_write,
+                    cache_write_1h=(
+                        total_usage.cache_write_1h + round_usage.cache_write_1h
+                    ),
+                )
             all_tool_calls.extend(tool_calls_this_round)
 
             # If we have an error or no tool calls, we're done.

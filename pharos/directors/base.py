@@ -21,6 +21,7 @@ The Protocol is intentionally minimal so each director can specialize.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -96,6 +97,62 @@ class Director(Protocol):
 
 
 # ---------- helpers shared by FN/DE/SDF ----------
+
+
+def check_permissions(entity: Any, run_ctx: RunContext) -> None:
+    """Enforce an entity's `required_permissions` against the run's grants.
+
+    Raises PermissionError if any required permission is missing. This
+    MUST be called by every Director before an entity's first fire so
+    that RBAC is enforced uniformly regardless of scheduling semantics
+    (FN / SDF / DE).
+    """
+    required: set[str] = getattr(entity, "required_permissions", set()) or set()
+    granted: set[str] = getattr(run_ctx, "granted_permissions", set()) or set()
+    missing = required - granted
+    if missing:
+        raise PermissionError(
+            f"entity {entity.node_id!r} ({type(entity).__name__}) "
+            f"requires {sorted(missing)} but run only grants "
+            f"{sorted(granted) if granted else 'no permissions'}"
+        )
+
+
+def collect_metrics(entity: Any) -> tuple[int, float]:
+    """Read (token_count, cost) from an entity after it fires.
+
+    Prefers entity-level cumulative counters (LLMAgent tracks
+    `total_tokens` / `total_cost` directly); falls back to counting
+    output-port tokens for entities that don't. Shared by all Directors
+    so the reported numbers are consistent across scheduling semantics.
+    """
+    token_count = getattr(entity, "total_tokens", 0) or sum(
+        len(p) for p in entity.outs.values()
+    )
+    cost = getattr(entity, "total_cost", 0.0) or sum(
+        t.cost_usd for p in entity.outs.values() for t in p.peek_all()
+    )
+    return (token_count, cost)
+
+
+async def teardown_all(graph: CompositeGraph) -> None:
+    """Release resources for every initialized entity in the graph.
+
+    Calls each entity's `teardown()` (e.g. LLMAgent closes its HTTP
+    client). Errors are swallowed so one entity's failed teardown does
+    not mask the run result or block the others. Directors call this in
+    a `finally` block so providers are always closed, even on error.
+    """
+    for node in graph.nodes.values():
+        inst = node.instance
+        if inst is None:
+            continue
+        if not getattr(inst, "_initialized", False):
+            continue
+        with contextlib.suppress(Exception):
+            await inst.teardown()
+        inst._initialized = False  # type: ignore[attr-defined]
+
 
 async def deliver_upstream(
     graph: CompositeGraph,
@@ -189,6 +246,9 @@ __all__ = [
     "FireContext",
     "RunContext",
     "RunResult",
+    "check_permissions",
+    "collect_metrics",
     "deliver_upstream",
+    "teardown_all",
     "topo_layers",
 ]

@@ -19,7 +19,10 @@ from pharos.directors.base import (
     FireContext,
     RunContext,
     RunResult,
+    check_permissions,
+    collect_metrics,
     deliver_upstream,
+    teardown_all,
     topo_layers,
 )
 
@@ -57,49 +60,56 @@ class FNDirector:
         total_cost = 0.0
         step_counter = 0
 
-        for layer_idx, layer in enumerate(layers):
-            # Build (entity, fire_ctx) pairs for this layer
-            tasks: list[asyncio.Task] = []
-            for node_id in layer:
-                node = graph.node(node_id)
-                if node.instance is None:
-                    continue
-                step_counter += 1
-                fire_ctx = FireContext(
-                    run_id=ctx.run_id,
-                    step_id=f"{ctx.run_id}:{step_counter}",
-                    iter=layer_idx,
-                    granted_permissions=getattr(ctx, "granted_permissions", set()),
-                )
-                tasks.append(
-                    asyncio.create_task(
-                        _safe_fire(node.instance, fire_ctx, ctx)
+        try:
+            for layer_idx, layer in enumerate(layers):
+                # Build (entity, fire_ctx) pairs for this layer
+                tasks: list[asyncio.Task] = []
+                for node_id in layer:
+                    node = graph.node(node_id)
+                    if node.instance is None:
+                        continue
+                    step_counter += 1
+                    fire_ctx = FireContext(
+                        run_id=ctx.run_id,
+                        step_id=f"{ctx.run_id}:{step_counter}",
+                        iter=layer_idx,
+                        granted_permissions=getattr(
+                            ctx, "granted_permissions", set()
+                        ),
                     )
-                )
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                # Aggregate
-                for r in results:
-                    if isinstance(r, BaseException):
-                        return RunResult(
-                            converged=False,
-                            iterations=layer_idx + 1,
-                            tokens_emitted=total_tokens,
-                            cost_usd=total_cost,
-                            error=f"{type(r).__name__}: {r}",
+                    tasks.append(
+                        asyncio.create_task(
+                            _safe_fire(node.instance, fire_ctx, ctx)
                         )
-                    if r is not None:
-                        total_tokens += r[0]
-                        total_cost += r[1]
+                    )
+                if tasks:
+                    results = await asyncio.gather(
+                        *tasks, return_exceptions=True
+                    )
+                    # Aggregate
+                    for r in results:
+                        if isinstance(r, BaseException):
+                            return RunResult(
+                                converged=False,
+                                iterations=layer_idx + 1,
+                                tokens_emitted=total_tokens,
+                                cost_usd=total_cost,
+                                error=f"{type(r).__name__}: {r}",
+                            )
+                        if r is not None:
+                            total_tokens += r[0]
+                            total_cost += r[1]
 
-            # Deliver upstream after layer completes
-            await deliver_upstream(graph, self._edge_index)
-        return RunResult(
-            converged=True,
-            iterations=len(layers),
-            tokens_emitted=total_tokens,
-            cost_usd=total_cost,
-        )
+                # Deliver upstream after layer completes
+                await deliver_upstream(graph, self._edge_index)
+            return RunResult(
+                converged=True,
+                iterations=len(layers),
+                tokens_emitted=total_tokens,
+                cost_usd=total_cost,
+            )
+        finally:
+            await teardown_all(graph)
 
 
 async def _safe_fire(
@@ -119,16 +129,9 @@ async def _safe_fire(
     """
     from pharos.observability.trace import current_span
 
-    # Permission check (BEFORE setup)
-    required = getattr(entity, "required_permissions", set()) or set()
-    granted = getattr(run_ctx, "granted_permissions", set()) or set()
-    missing = required - granted
-    if missing:
-        raise PermissionError(
-            f"entity {entity.node_id!r} ({type(entity).__name__}) "
-            f"requires {sorted(missing)} but run only grants "
-            f"{sorted(granted) if granted else 'no permissions'}"
-        )
+    # Permission check (BEFORE setup) — shared across FN/SDF/DE so
+    # RBAC is enforced no matter which Director drives the run.
+    check_permissions(entity, run_ctx)
 
     if not getattr(entity, "_initialized", False):
         await entity.setup(run_ctx)
@@ -157,14 +160,7 @@ async def _safe_fire(
         if span is not None:
             tracer.finish_span(span)
 
-    # Prefer entity-level counters (LLMAgent tracks these directly).
-    token_count = getattr(entity, "total_tokens", 0) or sum(
-        len(p) for p in entity.outs.values()
-    )
-    cost = getattr(entity, "total_cost", 0.0) or sum(
-        t.cost_usd for p in entity.outs.values() for t in p.peek_all()
-    )
-    return (token_count, cost)
+    return collect_metrics(entity)
 
 
 __all__ = ["FNDirector"]

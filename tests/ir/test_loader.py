@@ -94,10 +94,29 @@ class TestNodeSpecs:
         assert s.temperature is None
 
     def test_llm_spec_invalid_provider(self):
-        from pydantic import ValidationError
+        # `provider` is a free string so newly registered providers work
+        # in YAML without editing the schema; the spec itself accepts any
+        # name. Unknown names are rejected at graph-load / resolution time.
+        spec = LLMNodeSpec(id="x", provider="bogus", model="y")
+        assert spec.provider == "bogus"
 
-        with pytest.raises(ValidationError):
-            LLMNodeSpec(id="x", provider="bogus", model="y")  # type: ignore[arg-type]
+        from pharos.ir import load_graph_from_dict
+
+        with pytest.raises(ValueError, match="unknown LLM provider"):
+            load_graph_from_dict(
+                {
+                    "name": "g",
+                    "nodes": [
+                        {
+                            "id": "x",
+                            "type": "llm",
+                            "provider": "bogus",
+                            "model": "y",
+                        }
+                    ],
+                    "edges": [],
+                }
+            )
 
     def test_shell_spec_defaults(self):
         s = ShellNodeSpec(id="x")

@@ -49,7 +49,11 @@ class LLMNodeSpec(BaseModel):
 
     id: str
     type: Literal["llm", "faux"] = "llm"
-    provider: Literal["openai", "glm", "faux", "anthropic", "deepseek", "minimax"] = "openai"
+    # Any name resolvable by `_resolve_provider_class` (static map or the
+    # runtime registry). Kept as a free string so newly registered
+    # providers work in YAML without editing this schema; unknown names
+    # raise a clear error at load time in `_resolve_provider_class`.
+    provider: str = "openai"
     model: str
     system: str = ""
     temperature: float | None = None
@@ -152,13 +156,13 @@ def _resolve_provider_class(name: str) -> type:
     # Lazy import to avoid circular dependencies
     from pharos.llm.registry import get_provider_class, list_providers
 
-    cls = get_provider_class(name)
-    if cls is None:
+    try:
+        return get_provider_class(name)
+    except KeyError:
+        known = sorted(set(list(_PROVIDER_CLASSES) + list(list_providers())))
         raise ValueError(
-            f"unknown LLM provider: {name!r}. "
-            f"Known: {sorted(set(list(_PROVIDER_CLASSES) + list(list_providers())))}"
-        )
-    return cls
+            f"unknown LLM provider: {name!r}. Known: {known}"
+        ) from None
 
 
 def _build_entity(node_raw: dict[str, Any]) -> Entity:
