@@ -317,6 +317,11 @@ def trace(
         "-i",
         help="Open the TUI viewer (falls back to text in non-TTY)",
     ),
+    otlp: str | None = typer.Option(
+        None,
+        "--otlp",
+        help="Export the run's spans as OTLP/JSON to this path instead of printing",
+    ),
 ) -> None:
     """Show a recorded run's trace tree."""
     from pharos.runtime import get_run, list_runs
@@ -346,6 +351,15 @@ def trace(
         console.print(f"[red]No run with id {run_id!r}[/red]")
         console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
         raise typer.Exit(code=1)
+
+    if otlp is not None:
+        from pharos.observability.otlp import write_otlp_json
+
+        out_path = write_otlp_json(spans, otlp, service_name=f"pharos:{run_id}")
+        console.print(
+            f"[green]Exported {len(spans)} spans to {out_path} (OTLP/JSON)[/green]"
+        )
+        return
 
     if interactive:
         from pharos.observability.tui import interactive_view
