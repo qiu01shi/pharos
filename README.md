@@ -1,22 +1,184 @@
 # pharos
 
-> **Typed dataflow runtime for LLM workflows with first-class trace and replay.**
+> **Typed dataflow runtime for LLM workflows — with first-class trace, replay, and permissions.**
 
-pharos models an LLM pipeline as a typed graph: nodes are LLM calls
-/ shell commands / custom logic, edges are typed ports, and a
-Director drives the firing cycle. Every fire is wrapped in a
-span; every token is hash-chained; replays reproduce a run
-byte-for-byte.
+pharos turns a multi-step LLM workflow into a **typed dataflow graph**: nodes are LLM calls / shell commands / Python code, edges are typed ports, and a **Director** drives the firing cycle. Every fire is wrapped in a span, every token is hash-chained, and replays reproduce a run **byte-for-byte** with zero network calls.
 
 Built to answer two real pain points:
-- **Multi-step LLM workflows are untraceable.** A bug-fix pipeline
-  that runs "analyze → patch → test → review" gives you no way to
-  see which step spent the tokens or which one hung.
-- **Multi-agent frameworks don't compose.** Each one reinvents
-  port types, scheduling, and error recovery.
 
-pharos is the missing primitive: a runtime that knows what your
-agents said, in what order, and at what cost.
+- **Multi-step LLM workflows are untraceable.** A bug-fix pipeline that runs "analyze → patch → test → review" gives you no way to see which step spent the tokens or which one hung.
+- **Tool-using agents are ungovernable.** A coding agent with shell access can `rm -rf /` while you sleep. pharos makes tool permissions a first-class deployment decision.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        YAML graph                                │
+│   nodes: [LLMAgent, ShellEntity, Router, Memory, Python]        │
+│   edges: { src: agent.text, dst: reviewer.prompt }             │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │ load_graph (pharos/ir)
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                     CompositeGraph                              │
+│  ┌──────────┐    ┌────────────┐    ┌──────────┐                  │
+│  │ LLMAgent │ ←─ │ ToolReg    │    │ Shell    │                  │
+│  │ ports:   │    │ bash/read/ │    │ ports:   │                  │
+│  │ prompt   │    │ write/edit │    │ command  │                  │
+│  │ text     │    │ delete/    │    │ stdout   │                  │
+│  │ tool_calls    │ glob/grep  │    │ exit_code│                  │
+│  └─────┬────┘    └────────────┘    └────┬─────┘                  │
+│        │                                │                        │
+│        ↓                                ↓                        │
+│  ┌────────────────────────────────────────────────────┐         │
+│  │           Director (FN / SDF / DE)                  │         │
+│  │  • topo_layers → asyncio.gather per layer         │         │
+│  │  • permission check BEFORE setup()                 │         │
+│  │  • wrap each fire in a Trace span                  │         │
+│  │  • deliver_upstream: token flow between ports      │         │
+│  └────────────────────────────────────────────────────┘         │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ↓                     ↓                     ↓
+  ┌──────────┐          ┌──────────┐         ┌──────────┐
+  │ LLM call │          │ Tool exec│         │ Shell    │
+  │ MiniMax  │          │ parallel │         │ subprocess│
+  │ Anthropic│          │ via      │         │ capture   │
+  │ OpenAI   │          │ asyncio. │         │ stdout    │
+  │ GLM      │          │ gather   │         │ + stderr  │
+  │ DeepSeek │          │          │         │           │
+  └────┬─────┘          └────┬─────┘         └────┬─────┘
+       │                     │                   │
+       ↓                     ↓                   ↓
+  ┌──────────────────────────────────────────────────────┐
+  │  Token(hash) + Trace(span with events + attrs)        │
+  │  → ~/.pharos/runs/<uuid>.json  (cross-process)         │
+  └──────────────────────────────────────────────────────┘
+       │                     │                   │
+       ↓                     ↓                   ↓
+  ┌──────────────────────────────────────────────────────┐
+  │             Replay + ReplayProvider                   │
+  │  • replay <id>           — inspect recorded outputs   │
+  │  • replay --re-run       — re-execute, no network     │
+  │  • trace --interactive   — TUI tree view             │
+  └──────────────────────────────────────────────────────┘
+```
+
+### Layered design
+
+```
+pharos/
+├── core/             Token / Port / Entity / Graph (typed dataflow primitives)
+├── directors/        FN (topo) / SDF (feedback) / DE (event-driven)
+├── entities/         LLMAgent / Shell / Router / Memory / Python / ToolRegistry
+├── llm/              LLMProvider Protocol + 5 providers + ReplayProvider
+│   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
+│   └── catalog/      Model metadata per provider (cost, context window)
+├── observability/    Trace (Span + Events) / Metrics / Logs / Events / TUI viewer
+├── ir/               YAML graph loader (Pydantic schema)
+├── runtime/          Trace persistence (~/.pharos/runs/) + replay inspection
+├── env.py            Auto-load ~/.pharos/.env (shell env wins)
+└── cli.py            6 subcommands: run / validate / list-providers / doctor / trace / replay
+```
+
+---
+
+## Capabilities
+
+### What pharos does
+
+- ✅ **6 LLM providers** — OpenAI, Anthropic, DeepSeek, GLM, MiniMax (Anthropic-compatible), Faux
+- ✅ **3 Directors** — FN (one-shot topological), SDF (feedback loop, K-of-N stable convergence), DE (event-driven)
+- ✅ **5 Entities** — `LLMAgent`, `ShellEntity`, `Router`, `Memory`, plus custom Python classes via YAML
+- ✅ **7 Coding tools** — `bash`, `read`, `write`, `edit` (anchor-validated), `delete`, `glob`, `grep`
+- ✅ **Tool calling loop** — LLM emits tool calls, pharos executes them, feeds results back, loops up to N turns
+- ✅ **Parallel tool execution** — multiple tool calls in one round run via `asyncio.gather`
+- ✅ **Type-checked ports** — LLM output schema validated at every boundary
+- ✅ **Streaming** — `text_delta` events emitted live to downstream ports
+- ✅ **Permission RBAC** — each Entity declares `required_permissions`; `RunContext.granted_permissions` enforces at fire time
+- ✅ **Cross-process trace** — every span (event, attribute, duration) persisted to `~/.pharos/runs/<uuid>.json`
+- ✅ **TUI viewer** — `pharos trace --interactive <id>` shows span tree with color-coded durations
+- ✅ **Replay** — `pharos replay --re-run --graph <yaml> <id>` reproduces a run with zero network calls
+- ✅ **`.env` loader** — auto-loads `~/.pharos/.env` (shell env wins, no `python-dotenv` dependency)
+- ✅ **Multi-port inputs** — `--input-extra port=value` seeds any number of `__in__.<port>` edges
+- ✅ **Template substitution** — `--var key=value` replaces `${NAME}` in double-quoted YAML strings
+
+### What pharos deliberately doesn't do
+
+- ❌ Web UI / dashboard (CLI + TUI only)
+- ❌ Multi-machine distributed execution (single-process by design)
+- ❌ IDE integration (no LSP, no in-editor live agent)
+- ❌ Fuzzy string matching for `edit` (anchor must match exactly — quote chars included)
+- ❌ Vision / image reading (text-only `read` tool)
+- ❌ Live streaming UI (CLI prints after run completes; trace is post-hoc)
+
+---
+
+## Quickstart
+
+```bash
+# Clone and install
+git clone https://github.com/qiu01shi/pharos.git
+cd pharos
+uv sync --all-extras
+
+# 1. Zero-cost demo (FauxProvider — no API key needed)
+uv run pharos run graphs/03_faux_demo.yaml --input "say hi"
+
+# 2. Real LLM via MiniMax (Anthropic-compatible at minimaxi.com)
+echo "MINIMAX_CN_API_KEY=sk-..." > ~/.pharos/.env
+uv run pharos run graphs/minimax-demo.yaml --input "1+1=?"
+
+# 3. Coding agent (7 tools, permission-gated)
+uv run pharos run graphs/coding-agent.yaml \
+    --input "Read /tmp/sample.py, find the typo, fix it" \
+    --grant bash:execute --grant fs:read --grant fs:write
+
+# 4. Inspect a recorded run
+uv run pharos trace list
+uv run pharos trace --interactive <run_id>
+
+# 5. Replay offline (no network, byte-equal)
+uv run pharos replay --re-run --graph graphs/minimax-demo.yaml <run_id>
+```
+
+---
+
+## A real coding workflow
+
+`graphs/coding-agent.yaml`:
+```yaml
+name: coding-agent
+director: fn
+nodes:
+  - id: coder
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: |
+      You are a coding agent. Tools: bash, read, write, edit, delete, glob, grep.
+      When asked to work with files, USE the tools. Be concise.
+    max_tokens: 1000
+    tools: coding
+    max_tool_iterations: 10
+edges:
+  - { src: __in__.prompt, dst: coder.prompt }
+  - { src: coder.text,    dst: __out__.response }
+```
+
+```bash
+$ uv run pharos run graphs/coding-agent.yaml \
+    --input "Use read tool to read /tmp/sample.py and reply DONE" \
+    --grant fs:read
+# ... LLM streams, calls read, returns DONE ...
+# tokens=1454 cost=$0.0015
+# __out__.result = DONE
+# coder.tool_calls = [{"name": "read", "arguments": {"path": "/tmp/sample.py"}}]
+# coder.usage = {"input": 1452, "output": 2, ...}
+```
 
 ---
 
@@ -24,105 +186,91 @@ agents said, in what order, and at what cost.
 
 | What you get | What you don't get |
 | --- | --- |
-| ✅ Type-checked ports (LLM output schema validated at boundary) | ❌ A drop-in replacement for LangChain |
-| ✅ Streaming by default (Supervisor text is consumed live by workers) | ❌ Visual drag-and-drop editor (planned P5) |
-| ✅ Per-step trace + cost (find which actor is slow/expensive) | ❌ Multi-language runtime (Python only) |
-| ✅ Replay (re-execute a recorded run without LLM calls) | ❌ Distributed execution (planned P9+) |
-| ✅ 100 concurrent actors in **14ms** (vs. ~1000ms sequential) | ❌ Auto-fixing of broken graphs |
+| ✅ Typed ports with schema validation at LLM boundaries | ❌ Drop-in LangChain replacement |
+| ✅ Real coding tools (`bash/read/write/edit/...`) in 444 lines | ❌ IDE integration (VS Code plugin) |
+| ✅ Permission RBAC on every entity + tool | ❌ Web dashboard (CLI + TUI only) |
+| ✅ Cross-process trace with token hash chain | ❌ Multi-machine distributed execution |
+| ✅ Byte-equal replay without network | ❌ Fuzzy match / smart-quote handling |
+| ✅ Auto-load `~/.pharos/.env` (no python-dotenv) | ❌ Image / vision tool reading |
+| ✅ 100 concurrent actors: **P95 ≈ 10ms** | ❌ GUI drag-and-drop editor |
 
 ---
 
-## 5-minute quickstart
+## Performance
 
-```bash
-git clone https://github.com/your-org/pharos
-cd pharos
-uv sync --all-extras
+```
+pharos 100-actor benchmark (bench/hello_world.py):
 
-# Run the demo (no API key needed)
-uv run pharos run graphs/03_faux_demo.yaml --input "say hi"
+  100 LLM calls  (faux provider, ~10 ms each, serial: ~1000 ms)
+  + FN Director (topological, asyncio.gather per layer)
+
+  P50:   9.8 ms
+  P95:  10.5 ms
+  P99:  12.1 ms
+  Speedup vs serial: ~100x
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) for the full tour.
-
----
-
-## Hello workflow
-
-```yaml
-# hello.yaml
-name: hello
-director: fn
-nodes:
-  - id: greeter
-    type: llm
-    provider: glm
-    model: glm-4.5-air
-    system: "Reply in 3 words max."
-edges:
-  - { src: __in__.prompt, dst: greeter.prompt }
-  - { src: greeter.text,  dst: __out__.response }
-```
-
-```bash
-pharos run hello.yaml --input "hi there"
-# → "Hi there friend."
-```
+The dataflow runtime has near-zero overhead — 90 concurrent entities finish in the same time as 1 entity would alone.
 
 ---
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md) — install + first run
-- [Architecture](docs/architecture.md) — design rationale, layers, contracts
-- [Cookbook](docs/cookbook.md) — real workflows (multi-reviewer, custom entities, streaming, etc.)
-- [P0 Retrospective](docs/P0-COMPLETE.md) — what's done, what isn't, and the key engineering decisions
+- [docs/quickstart.md](docs/quickstart.md) — install + first run
+- [docs/architecture.md](docs/architecture.md) — design rationale, layered contracts, token-hash semantics
+- [docs/cookbook.md](docs/cookbook.md) — real workflows (multi-reviewer, custom entities, streaming, SDF feedback, etc.)
+- [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md) — [docs/P8-COMPLETE.md](docs/P8-COMPLETE.md) — per-phase retrospectives
 
 ---
 
 ## Current status
 
-**P0–P6 done.**
-
 | Phase | What | Status |
 | --- | --- | --- |
-| **P0** | Core abstractions, FN Director, FauxProvider, trace, perf baseline | ✅ |
-| **P1** | OpenAI + GLM providers, YAML IR, CLI, trace persistence | ✅ |
-| **P2** | Anthropic + DeepSeek providers, Router + Memory entities, SDF Director (feedback loops) | ✅ |
-| **P3** | Custom Python entities from YAML, deterministic replay inspection | ✅ |
-| **P4** | DE Director (trigger-driven firing) | ✅ |
-| **P5** | ReplayProvider + `pharos replay --re-run` (byte-equal replay, no network) | ✅ |
-| **P6** | TUI viewer (`pharos trace -i`) + integration test scaffolding | ✅ |
-| **P7+** | PN / CT directors, real-API CI, distributed execution | pending |
+| P0 | Core abstractions, FN Director, FauxProvider, trace, perf baseline | ✅ |
+| P1 | OpenAI + GLM providers, YAML IR, CLI, trace persistence | ✅ |
+| P2 | Anthropic + DeepSeek providers, Router + Memory entities, SDF Director | ✅ |
+| P3 | Custom Python entities from YAML, deterministic replay inspection | ✅ |
+| P4 | DE Director (trigger-driven firing) | ✅ |
+| P5 | ReplayProvider + `pharos replay --re-run` (byte-equal replay, no network) | ✅ |
+| P6 | TUI viewer (`pharos trace -i`) + integration test scaffolding | ✅ |
+| P8 | Tool calling loop for LLMAgent | ✅ |
+| A | CLI multi-port seed (`--input-extra`) + template substitution (`--var`) | ✅ |
+| B | Permission declarations + RBAC enforcement | ✅ |
+| MiniMax | MiniMax provider (Anthropic-compatible) + `.env` auto-load + real-API verification | ✅ |
+| Coding Agent | 7 coding tools (`bash/read/write/edit/delete/glob/grep`) + CLI integration | ✅ |
 
 **Numbers**:
-- 231 tests (2 integration skipped by default), 0 lint errors
-- 100 concurrent actors: P95 ≈ 10ms (target 2000ms)
-- 6 Providers (incl. ReplayProvider)
+- 299 tests (2 integration skipped without API key), 0 lint errors
+- 100 concurrent actors: P95 ≈ 10ms
+- 6 LLM providers (incl. ReplayProvider)
 - 3 Directors: FN / SDF / DE
-- 5 Entities: LLMAgent / ShellEntity / Router / Memory / (custom Python)
+- 5 built-in Entities + custom Python + ToolRegistry (7 coding tools)
 - 6 CLI subcommands
 
-See [docs/P0-COMPLETE.md](docs/P0-COMPLETE.md), [P1](docs/P1-COMPLETE.md), [P2](docs/P2-COMPLETE.md), [P3](docs/P3-COMPLETE.md), [P4](docs/P4-COMPLETE.md), [P5](docs/P5-COMPLETE.md), [P6](docs/P6-COMPLETE.md).
+---
 
 ## Project layout
 
 ```
 pharos/
 ├── pharos/
-│   ├── core/              Token / Port / Entity / Graph (typed dataflow)
-│   ├── llm/               LLMProvider Protocol + OpenAI / GLM / Faux
-│   ├── llm/catalog/       Model metadata per provider
-│   ├── directors/         FN (DE/PN/SDF/CT in later phases)
-│   ├── entities/          LLMAgent, ShellEntity, more later
-│   ├── observability/     Trace / Metrics / Logs / Events
-│   ├── ir/                YAML graph loader
-│   ├── runtime/           (Replay comes in P2)
-│   └── cli.py             `pharos` command
-├── graphs/                Sample workflows
-├── tests/                 151 tests across 9 modules
-├── bench/                 Performance baselines
-└── docs/                  This documentation
+│   ├── core/             Token / Port / Entity / Graph (typed dataflow)
+│   ├── llm/              LLMProvider Protocol + providers + catalog
+│   │   ├── providers/    openai / anthropic / deepseek / glm / minimax / faux / replay
+│   │   └── catalog/      Model metadata per provider
+│   ├── directors/        FN (topo) / SDF (feedback) / DE (event-driven)
+│   ├── entities/         LLMAgent / Shell / Router / Memory + tools (coding / builtin)
+│   ├── observability/    Trace / Metrics / Logs / Events / TUI viewer
+│   ├── ir/               YAML graph loader (Pydantic schema)
+│   ├── runtime/          Trace persistence + replay summary
+│   ├── env.py            Auto-load ~/.pharos/.env
+│   └── cli.py            `pharos` command (run / validate / list-providers / doctor / trace / replay)
+├── graphs/               Sample workflows (9 graphs: single LLM, SDF feedback, coding agent, etc.)
+├── tests/                299 tests across 14 modules
+├── bench/                Performance baselines (hello_world.py)
+├── scripts/              End-to-end verification scripts
+└── docs/                 Architecture / quickstart / cookbook + 9 phase retrospectives
 ```
 
 ---
