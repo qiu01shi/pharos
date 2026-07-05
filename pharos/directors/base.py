@@ -22,12 +22,15 @@ The Protocol is intentionally minimal so each director can specialize.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from pharos.core.graph import CompositeGraph
 from pharos.core.permissions import PermissionPolicy
+from pharos.core.token import Token
 
 
 class BudgetExceededError(Exception):
@@ -194,6 +197,62 @@ def check_permissions(entity: Any, run_ctx: RunContext) -> None:
     run_ctx.policy().check(required, subject=subject)
 
 
+def input_lineage_digest(entity: Any) -> str | None:
+    """Digest of the entity's current input head-token hashes.
+
+    Snapshotted BEFORE ``fire()`` consumes the inputs, this becomes the
+    ``prev_hash`` stamped onto the tokens the fire emits — so an output
+    token's hash transitively depends on every input it was derived from.
+    Returns None when the entity has no pending input (a source node).
+    """
+    parts: list[str] = []
+    for name in sorted(entity.ins):
+        head = entity.ins[name].peek()
+        if head is not None:
+            parts.append(f"{name}:{head.self_hash}")
+    if not parts:
+        return None
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def stamp_lineage(entity: Any, prev_digest: str | None) -> None:
+    """Rewrite freshly emitted output tokens with real lineage.
+
+    ``OutputPort.emit`` cannot know its owning node or the upstream it
+    depended on, so it emits tokens with a placeholder ``origin`` and no
+    ``prev_hash``. Here — inside the single shared fire path — we know
+    both, so we replace each not-yet-stamped token with one carrying
+    ``origin = "<node_id>.<port>"`` and ``prev_hash = prev_digest``.
+
+    Idempotent: a token counts as stamped once its ``origin`` matches the
+    normalized form, so nodes that re-fire (SDF/DE) don't re-stamp tokens
+    carried over from earlier rounds — the head token keeps a stable hash.
+    """
+    for port_name, port in entity.outs.items():
+        normalized = f"{entity.node_id}.{port_name}"
+        rebuilt: deque[Token] = deque()
+        changed = False
+        for tok in port.buffer:
+            if tok.origin != normalized:
+                tok = Token(
+                    value=tok.value,
+                    origin=normalized,
+                    ts=tok.ts,
+                    prev_hash=(
+                        tok.prev_hash if tok.prev_hash is not None else prev_digest
+                    ),
+                    run_id=tok.run_id,
+                    iter=tok.iter,
+                    is_partial=tok.is_partial,
+                    cost_usd=tok.cost_usd,
+                    metadata=tok.metadata,
+                )
+                changed = True
+            rebuilt.append(tok)
+        if changed:
+            port.buffer = rebuilt
+
+
 def build_edge_index(
     graph: CompositeGraph,
 ) -> dict[str, list[tuple[str, str]]]:
@@ -273,6 +332,10 @@ async def safe_fire(
             },
         )
 
+    # Snapshot input lineage BEFORE fire() consumes the input ports, so the
+    # tokens this fire emits can carry a prev_hash derived from their inputs.
+    prev_digest = input_lineage_digest(entity)
+
     metrics = (0, 0.0)
     try:
         if replay_this:
@@ -282,6 +345,9 @@ async def safe_fire(
         elif live:
             await entity.fire(fire_ctx)
         # else: pure-replay of a fire with no recorded output -> emit nothing.
+        # Stamp real origin + lineage onto freshly emitted tokens (shared by
+        # live and replay paths so recorded and replayed hashes agree).
+        stamp_lineage(entity, prev_digest)
         if recorder is not None:
             recorder.capture(entity, entity.node_id, fire_index)
         # Metrics + budget are charged inside the try so a hard-budget abort
@@ -434,7 +500,9 @@ __all__ = [
     "check_permissions",
     "collect_metrics",
     "deliver_upstream",
+    "input_lineage_digest",
     "safe_fire",
+    "stamp_lineage",
     "teardown_all",
     "topo_layers",
 ]

@@ -11,6 +11,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from pharos import __version__
@@ -105,6 +106,16 @@ def run(
         "--answer",
         help="Preset a human node's answer as node=value (repeatable)",
     ),
+    record_fixture: Path | None = typer.Option(
+        None,
+        "--record-fixture",
+        help="Also write this run as an Agent-CI golden fixture (JSON path)",
+    ),
+    fixture_name: str | None = typer.Option(
+        None,
+        "--fixture-name",
+        help="Name for the recorded fixture (default: graph name)",
+    ),
 ) -> None:
     """Load a graph and run it once with --input as the initial prompt."""
     raw_text = _substitute_vars(graph, var)
@@ -126,6 +137,7 @@ def run(
     _apply_answers(g, answer)
     director_name = raw.get("director", "fn")
     budget = _build_budget(raw.get("budget"), max_cost, max_tokens, budget_mode)
+    captured: dict[str, Any] = {}
     result, _backend = asyncio.run(
         _run_with_trace(
             g,
@@ -135,8 +147,28 @@ def run(
             converge_k,
             granted_permissions=set(grant),
             budget=budget,
+            outputs_out=captured if record_fixture else None,
         )
     )
+    if record_fixture:
+        from pharos.testing.runner import fixture_from_outputs
+
+        fx = fixture_from_outputs(
+            g,
+            graph,
+            director_name,
+            captured,
+            name=fixture_name or g.name,
+            seed=seed_map,
+            grant=list(grant),
+            var=_parse_kv(var),
+        )
+        fx.save(record_fixture)
+        console.print(
+            f"[green]Recorded fixture[/green] {record_fixture} "
+            f"([cyan]{len(fx.outputs)} node-fires[/cyan], "
+            f"digest={fx.chain_digest[:12]}…)"
+        )
     if json_out:
         typer.echo(json.dumps(_result_to_dict(result), indent=2, default=str))
     else:
@@ -326,6 +358,7 @@ async def _run_with_trace(
     granted_permissions: set[str] | None = None,
     replayer: Any = None,
     budget: RunBudget | None = None,
+    outputs_out: dict[str, Any] | None = None,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
     from pharos.runtime import RunRecorder, record_run
 
@@ -360,6 +393,10 @@ async def _run_with_trace(
         director=director_name,
     )
     await _index_run_sqlite(ctx.run_id, tracer.spans, director_name, result)
+    # Expose the captured entity outputs so `run --record-fixture` can build a
+    # fixture from the same live run instead of executing the graph twice.
+    if outputs_out is not None and recorder is not None:
+        outputs_out.update(recorder.to_dict())
     return result, backend
 
 
@@ -740,6 +777,223 @@ async def _replay_rerun(
     )
     result, _ = await _run_with_trace(g, "fn", want_trace=True)
     _print_summary(g, result, "fn")
+
+
+def _parse_kv(items: list[str]) -> dict[str, str]:
+    """Parse a list of ``key=value`` strings into a dict (first ``=`` splits)."""
+    out: dict[str, str] = {}
+    for item in items:
+        if "=" in item:
+            k, _, v = item.partition("=")
+            out[k.strip()] = v
+    return out
+
+
+@app.command()
+def test(
+    target: Path = typer.Argument(
+        ..., help="Fixture JSON file, or a directory of *.fixture.json"
+    ),
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Re-run the real model(s) and diff against the golden (Phase 3)",
+    ),
+    update: bool = typer.Option(
+        False, "--update", help="Re-bless the golden fixture from a --live run"
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Output JSON"),
+    junit: Path | None = typer.Option(
+        None, "--junit", help="Write a JUnit XML report to this path"
+    ),
+) -> None:
+    """Run Agent-CI fixtures as a regression gate.
+
+    Offline (default): replay each fixture's recorded outputs with zero network
+    cost, recompute its chain_digest, and evaluate its assertions. Exits non-zero
+    if any fixture drifts or an assertion fails — drop-in for CI.
+
+    Record a fixture first with: pharos run <graph> ... --record-fixture fx.json
+    """
+    from pharos.testing.fixture import Fixture
+
+    paths = _fixture_paths(target)
+    if not paths:
+        console.print(f"[red]No fixture(s) found at {target}[/red]")
+        raise typer.Exit(code=2)
+
+    results = []
+    for p in paths:
+        fx = Fixture.load(p)
+        if live:
+            from pharos.testing.runner import test_live
+
+            res = asyncio.run(test_live(fx, p, update=update))
+        else:
+            from pharos.testing.runner import test_offline
+
+            res = asyncio.run(test_offline(fx))
+        results.append((p, fx, res))
+
+    if junit is not None:
+        _write_junit(junit, results)
+    if json_out:
+        typer.echo(
+            json.dumps(
+                [r.to_dict() for _, _, r in results], indent=2, default=str
+            )
+        )
+    else:
+        _render_test_results(results, live=live)
+
+    if not all(r.passed for _, _, r in results):
+        raise typer.Exit(code=1)
+
+
+def _fixture_paths(target: Path) -> list[Path]:
+    """Resolve a fixture target to a sorted list of fixture files."""
+    if target.is_dir():
+        return sorted(target.glob("*.fixture.json")) or sorted(
+            target.glob("*.json")
+        )
+    return [target] if target.exists() else []
+
+
+def _render_test_results(results: list[Any], *, live: bool) -> None:
+    n_pass = sum(1 for _, _, r in results if r.passed)
+    for path, _fx, r in results:
+        status = "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
+        console.print(f"\n{status} [cyan]{escape(r.name)}[/cyan]  ({escape(str(path))})")
+        if not r.graph_ok:
+            console.print(
+                "  [yellow]warning:[/yellow] graph file changed since record; "
+                "offline replay can't see behavior changes — run "
+                "[cyan]--live --update[/cyan] to re-bless."
+            )
+        if not r.digest_ok:
+            console.print(
+                f"  [red]chain_digest drift[/red] "
+                f"expected {r.expected_digest[:12]}… got {r.actual_digest[:12]}…"
+            )
+        for a in r.assertion_results:
+            mark = "[green]ok[/green]" if a.ok else "[red]fail[/red]"
+            console.print(
+                f"  {mark} {escape(a.target)} {a.op}: {escape(a.detail)}"
+            )
+        if r.error:
+            console.print(f"  [red]error:[/red] {escape(r.error)}")
+        drift = getattr(r, "drift", None)
+        if live and drift is not None and drift.has_changes():
+            _render_run_diff(drift, "golden", "live")
+    color = "green" if n_pass == len(results) else "red"
+    console.print(
+        f"\n[{color}]{n_pass}/{len(results)} fixtures passed[/{color}]"
+    )
+
+
+def _write_junit(path: Path, results: list[Any]) -> None:
+    """Write a minimal JUnit XML report (one testcase per fixture)."""
+    import xml.etree.ElementTree as ET
+
+    n_fail = sum(1 for _, _, r in results if not r.passed)
+    suite = ET.Element(
+        "testsuite",
+        name="pharos-agent-ci",
+        tests=str(len(results)),
+        failures=str(n_fail),
+    )
+    for _p, _fx, r in results:
+        case = ET.SubElement(suite, "testcase", name=r.name, classname="pharos.test")
+        if not r.passed:
+            msgs = []
+            if not r.digest_ok:
+                msgs.append(
+                    f"chain_digest drift: expected {r.expected_digest} "
+                    f"got {r.actual_digest}"
+                )
+            msgs += [
+                f"{a.target} {a.op}: {a.detail}"
+                for a in r.assertion_results
+                if not a.ok
+            ]
+            if r.error:
+                msgs.append(r.error)
+            failure = ET.SubElement(
+                case, "failure", message="; ".join(msgs) or "failed"
+            )
+            failure.text = "\n".join(msgs)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+
+@app.command()
+def diff(
+    run_a: str = typer.Argument(..., help="Baseline run id"),
+    run_b: str = typer.Argument(..., help="Run id to compare against the baseline"),
+    json_out: bool = typer.Option(False, "--json", help="Output JSON"),
+) -> None:
+    """Structurally diff two recorded runs' per-node outputs.
+
+    Aligns the two runs by (node, fire, port) and shows exactly which output
+    changed — JSON field paths, text line diffs — instead of an opaque blob
+    comparison. Descriptive by design: it always exits 0.
+    """
+    from pharos.runtime import get_run_outputs
+    from pharos.testing.diff import diff_runs
+
+    a = get_run_outputs(run_a)
+    b = get_run_outputs(run_b)
+    if not a and not b:
+        console.print(
+            f"[red]No recorded outputs for {run_a!r} or {run_b!r}[/red]"
+        )
+        console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
+        raise typer.Exit(code=1)
+
+    rd = diff_runs(a, b)
+    if json_out:
+        typer.echo(json.dumps(rd.to_dict(), indent=2, default=str))
+        return
+    _render_run_diff(rd, run_a, run_b)
+
+
+def _render_run_diff(rd: Any, a_label: str, b_label: str) -> None:
+    """Pretty-print a RunDiff to the console (used by `diff` and `test --live`)."""
+    console.print(
+        f"\n[bold]diff[/bold] [red]{escape(a_label)}[/red] "
+        f"-> [green]{escape(b_label)}[/green]"
+    )
+    if not rd.has_changes():
+        console.print("[green]No differences in recorded outputs.[/green]")
+        return
+    for pd in rd.port_diffs:
+        head = f"{pd.node_id}:{pd.fire_index}.{pd.port}"
+        console.print(
+            f"\n[cyan]{escape(head)}[/cyan] [yellow]{pd.status}[/yellow] "
+            f"({pd.kind})"
+        )
+        if pd.kind == "json" and pd.field_changes:
+            for fc in pd.field_changes:
+                console.print(
+                    f"  {fc.kind} {escape(fc.path)}: "
+                    f"{escape(repr(fc.before))} -> {escape(repr(fc.after))}"
+                )
+        elif pd.kind == "text" and pd.line_diff:
+            for line in pd.line_diff:
+                style = (
+                    "green" if line.startswith("+")
+                    else "red" if line.startswith("-")
+                    else "dim"
+                )
+                console.print(f"  [{style}]{escape(line)}[/{style}]")
+        else:
+            console.print(f"  before: {escape(repr(pd.before))}")
+            console.print(f"  after:  {escape(repr(pd.after))}")
+    if rd.propagation:
+        console.print("\n[bold]propagation[/bold]")
+        for node in sorted(rd.propagation):
+            downs = ", ".join(rd.propagation[node])
+            console.print(f"  {escape(node)} -> {escape(downs)}")
 
 
 def _print_summary(g: CompositeGraph, result: Any, director_name: str = "fn") -> None:

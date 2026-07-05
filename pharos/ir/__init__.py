@@ -72,6 +72,9 @@ class LLMNodeSpec(BaseModel):
     #   "raise"      -> fail the fire (pairs with a `retry:` block to re-try)
     #   "error_port" -> emit the message on the `error` port for a Router
     on_invalid: Literal["raise", "error_port"] = "raise"
+    # Self-heal: feed the schema error back to the model and re-ask, up to this
+    # many times, before applying on_invalid. 0 = disabled (validate once).
+    max_repair_attempts: int = 0
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -297,6 +300,7 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
             max_tool_iterations=llm_spec.max_tool_iterations,
             output_schema=llm_spec.output_schema,
             on_invalid=llm_spec.on_invalid,
+            max_repair_attempts=llm_spec.max_repair_attempts,
         )
         return LLMAgent(node_id=nid, config=cfg)
 

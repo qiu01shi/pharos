@@ -310,6 +310,11 @@ class RunRecorder:
                         "port": port_name,
                         "type": tok.value.type,
                         "payload": tok.value.payload,
+                        # Lineage travels with the recording so a fixture
+                        # carries the hash chain (used by chain_digest / diff).
+                        "self_hash": tok.self_hash,
+                        "prev_hash": tok.prev_hash,
+                        "origin": tok.origin,
                     }
                 )
         self._data[f"{self.prefix}{node_id}:{fire_index}"] = emitted

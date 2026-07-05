@@ -1,0 +1,62 @@
+name: Agent CI
+
+# Regression-gate recorded agent runs. The offline job replays committed
+# fixtures with zero network cost and fails on drift or a broken assertion —
+# safe to run on every commit. The optional live job re-runs the real model to
+# catch content drift; enable it by adding provider API keys as repo secrets.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  offline:
+    name: Agent CI (offline, zero cost)
+    runs-on: ubuntu-latest
+    env:
+      UV_LINK_MODE: copy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Replay-gate committed fixtures
+        run: uv run pharos test tests/agent --junit agent-ci.xml
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-ci-report
+          path: agent-ci.xml
+
+  # Optional: re-run the real model(s) and judge drift against the golden.
+  # Requires provider API keys as secrets; remove `if:` to always run.
+  live:
+    name: Agent CI (live drift)
+    runs-on: ubuntu-latest
+    if: ${{ false }}  # flip to a schedule/label once secrets are configured
+    env:
+      UV_LINK_MODE: copy
+      MINIMAX_CN_API_KEY: ${{ secrets.MINIMAX_CN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Live drift check
+        run: uv run pharos test tests/agent --live --junit agent-ci-live.xml
