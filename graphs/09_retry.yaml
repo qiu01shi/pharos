@@ -1,0 +1,23 @@
+# Resilience: retry a flaky node with backoff.
+#
+# Any node can declare a `retry:` block. The node is wrapped in a
+# RetryEntity that re-fires the inner entity on exception, up to
+# max_attempts, waiting backoff_s between tries. Permissions, tracing and
+# replay apply to the wrapper like any other node.
+#
+# Here a shell node is retried up to 3 times. (echo succeeds on the first
+# try; the retry only kicks in when fire() raises — e.g. a killed
+# subprocess or, for an LLM node, a provider error.)
+#
+# Run:
+#   uv run pharos run graphs/09_retry.yaml --input "echo hi" --grant shell:execute
+name: retry-demo
+director: fn
+nodes:
+  - id: run
+    type: shell
+    timeout: 30
+    retry: { max_attempts: 3, backoff_s: 0.2 }
+edges:
+  - { src: __in__.prompt, dst: run.command }
+  - { src: run.stdout,    dst: __out__.output }

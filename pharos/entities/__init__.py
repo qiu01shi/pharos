@@ -2,7 +2,15 @@
 
 from pharos.entities.llm import LLMAgent, LLMEntityConfig
 from pharos.entities.memory import Memory
+from pharos.entities.retry import RetryEntity
 from pharos.entities.router import Router
 from pharos.entities.shell import ShellEntity
 
-__all__ = ["LLMAgent", "LLMEntityConfig", "Memory", "Router", "ShellEntity"]
+__all__ = [
+    "LLMAgent",
+    "LLMEntityConfig",
+    "Memory",
+    "RetryEntity",
+    "Router",
+    "ShellEntity",
+]

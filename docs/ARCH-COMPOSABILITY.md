@@ -100,7 +100,32 @@ flowchart LR
 
 ---
 
-## 3. General record/replay (beyond LLM)
+## 3. Retry with backoff (`RetryEntity`)
+
+Same "wrap an entity" pattern, for resilience. Add a `retry:` block to any
+non-subgraph node and the loader wraps it in a `RetryEntity`
+(`pharos/entities/retry.py`):
+
+```yaml
+# graphs/09_retry.yaml
+nodes:
+  - id: run
+    type: shell
+    retry: { max_attempts: 3, backoff_s: 0.2 }
+```
+
+`fire()` snapshots the node's inputs once, then runs the inner entity up to
+`max_attempts` times, re-seeding the same inputs each attempt. An attempt
+"fails" when `inner.fire()` raises; after `backoff_s` seconds it tries again.
+On success the inner output tokens are moved out unchanged (via `receive`, so
+`cost_usd` and lineage survive); on exhaustion the last exception is re-raised
+so the Director marks the run failed. `attempts_used` records how many attempts
+the last fire consumed. Retries re-run side effects, so prefer it for
+idempotent operations (LLM calls, reads) or where a duplicate is acceptable.
+
+---
+
+## 4. General record/replay (beyond LLM)
 
 Previously only LLM provider calls were replayable. The replay boundary now sits
 at every entity's **output** layer, so shell / python / tool / subgraph nodes
@@ -118,7 +143,7 @@ reproduce byte-for-byte too.
 
 ---
 
-## 4. Cross-cutting foundation
+## 5. Cross-cutting foundation
 
 - **Unified firing.** One `safe_fire()` + `build_edge_index()` in
   `pharos/directors/base.py`; FN/SDF/DE share the scheduling skeleton and wrap
