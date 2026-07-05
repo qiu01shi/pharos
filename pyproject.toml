@@ -64,6 +64,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B", "SIM"]
+"scripts/**/*.py" = ["B", "SIM"]
 
 # ==================== mypy ====================
 # Note: pharos uses Pydantic + asyncio Protocol, which produces false
