@@ -1,37 +1,31 @@
-"""Tool Protocol + Registry.
+"""Tool Protocol + Registry — supports sync and async tools.
 
-A Tool is a callable that takes a dict of arguments and returns a
-string result. Tools are registered with a JSON Schema describing
-their arguments, which is sent to the LLM as part of the context.
+A Tool is a callable + JSON Schema. Tools are registered with the
+registry and sent to the LLM via `Context.tools` as `Tool` objects.
 
-Usage:
-    from pharos.entities.tools import ToolRegistry
+Sync fn:  fn(**args) -> str
+Async fn: async fn(**args) -> str
 
-    reg = ToolRegistry()
-    reg.register(
-        name="get_weather",
-        description="Get the current weather for a city.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "city": {"type": "string", "description": "City name"},
-                "unit": {"type": "string", "enum": ["c", "f"], "default": "c"},
-            },
-            "required": ["city"],
-        },
-        fn=lambda city, unit="c": f"sunny in {city}, 72°{unit}",
-    )
+Permission:
+    Tools can declare `required_permission`. At execute() time,
+    the caller's `granted_permissions` must contain it, else
+    `is_error=True` is returned.
 
-    # Or register built-in tools (see tools_builtins.py)
-    from pharos.entities.tools_builtins import register_builtins
-    register_builtins(reg)
+Parallel execution:
+    `execute_batch()` runs multiple tool calls concurrently
+    via asyncio.gather. LLMAgent uses this when the LLM emits
+    multiple tool_calls in one round.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from pharos.llm.types import Tool
 
 
 class ToolError(Exception):
@@ -55,7 +49,6 @@ class ToolCallResult:
     error: str | None = None
 
     def to_message_dict(self) -> dict[str, Any]:
-        """Render as a ToolResultMessage-shaped dict for serialization."""
         d: dict[str, Any] = {
             "tool_call_id": self.tool_call_id,
             "name": self.name,
@@ -71,7 +64,15 @@ class ToolCallResult:
 class ToolRegistry:
     """A collection of tools the LLM can call.
 
-    Tools are registered via `register()` and looked up by name.
+    Each tool is registered with:
+        - name (str)
+        - description (str)
+        - parameters (JSON Schema dict)
+        - fn (sync callable or async coroutine fn)
+        - required_permission (optional str)
+
+    `list_tools()` returns `list[Tool]` (pharos.llm.types.Tool),
+    which is what providers expect in `Context.tools`.
     """
 
     def __init__(self) -> None:
@@ -85,17 +86,6 @@ class ToolRegistry:
         fn: Callable[..., Any],
         required_permission: str | None = None,
     ) -> None:
-        """Register a tool callable.
-
-        Args:
-            name: Tool identifier (must match what the LLM emits).
-            description: Human-readable; sent to the LLM.
-            parameters: JSON Schema for arguments.
-            fn: The callable. Must accept kwargs matching the schema.
-            required_permission: If set, callers must have this
-                permission to invoke the tool (checked at
-                execute() time, not registration).
-        """
         self._tools[name] = {
             "description": description,
             "parameters": parameters,
@@ -114,19 +104,23 @@ class ToolRegistry:
             raise ToolError(name, f"unknown tool: {name!r}")
         return self._tools[name]
 
-    def list_tools(self) -> list[dict[str, Any]]:
-        """Return the tools as a list of JSON-Schema-compatible dicts.
-
-        This is what gets sent to the LLM via `Context.tools`.
-        """
+    def list_tools(self) -> list[Tool]:
+        """Return the tools as `Tool` objects for `Context.tools`."""
         return [
-            {
-                "name": name,
-                "description": info["description"],
-                "parameters": info["parameters"],
-            }
+            Tool(
+                name=name,
+                description=info["description"],
+                parameters=info["parameters"],
+            )
             for name, info in self._tools.items()
         ]
+
+    def tool_names(self) -> list[str]:
+        return sorted(self._tools.keys())
+
+    # ------------------------------------------------------------------
+    # Execute
+    # ------------------------------------------------------------------
 
     async def execute(
         self,
@@ -135,12 +129,6 @@ class ToolRegistry:
         tool_call_id: str = "",
         granted_permissions: set[str] | None = None,
     ) -> ToolCallResult:
-        """Execute a tool call.
-
-        Catches all exceptions and returns them as `is_error=True`
-        ToolCallResults so the LLM can react. Permission errors
-        (raised before execution) come back as is_error=True too.
-        """
         try:
             tool = self.get(name)
         except ToolError as e:
@@ -154,7 +142,9 @@ class ToolRegistry:
 
         # Permission check
         required = tool.get("required_permission")
-        if required and (granted_permissions is None or required not in granted_permissions):
+        if required and (
+            granted_permissions is None or required not in granted_permissions
+        ):
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -163,10 +153,13 @@ class ToolRegistry:
                 error=f"permission denied: requires {required!r}",
             )
 
-        # Execute
+        # Execute — detect async fn and await if needed
+        fn = tool["fn"]
         try:
-            result = tool["fn"](**arguments)
-            # Tool output should be a string; coerce if not
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(**arguments)
+            else:
+                result = fn(**arguments)
             output = result if isinstance(result, str) else str(result)
             return ToolCallResult(
                 tool_call_id=tool_call_id,
@@ -174,7 +167,6 @@ class ToolRegistry:
                 output=output,
             )
         except TypeError as e:
-            # Bad arguments
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -183,7 +175,6 @@ class ToolRegistry:
                 error=f"bad arguments: {e}",
             )
         except Exception as e:
-            # Tool crashed
             return ToolCallResult(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -191,6 +182,26 @@ class ToolRegistry:
                 is_error=True,
                 error=f"{type(e).__name__}: {e}",
             )
+
+    async def execute_batch(
+        self,
+        calls: list[dict[str, Any]],
+        granted_permissions: set[str] | None = None,
+    ) -> list[ToolCallResult]:
+        """Execute multiple tool calls in parallel.
+
+        Each call is a dict with keys: name, arguments, tool_call_id.
+        """
+        coros = [
+            self.execute(
+                name=c["name"],
+                arguments=c.get("arguments", {}),
+                tool_call_id=c.get("tool_call_id", ""),
+                granted_permissions=granted_permissions,
+            )
+            for c in calls
+        ]
+        return await asyncio.gather(*coros)
 
 
 __all__ = ["ToolCallResult", "ToolError", "ToolRegistry"]

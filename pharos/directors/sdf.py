@@ -76,6 +76,7 @@ class SDFDirector:
                 run_id=ctx.run_id,
                 step_id=f"{ctx.run_id}:{step_counter + 1}",
                 iter=it,
+                granted_permissions=getattr(ctx, "granted_permissions", set()),
             )
             tasks = [
                 asyncio.create_task(

@@ -55,6 +55,11 @@ class LLMNodeSpec(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     thinking_level: str | None = None
+    # Tool preset: "coding" = bash/read/write/edit/delete/glob/grep
+    #              "builtin" = echo/get_time/add_numbers
+    #              "none" (default) = no tools
+    tools: Literal["none", "coding", "builtin"] = "none"
+    max_tool_iterations: int = 5
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -166,7 +171,22 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
     if ntype in ("llm", "faux"):
         spec = LLMNodeSpec.model_validate(node_raw)
         provider_class = _resolve_provider_class(spec.provider)
-        # For faux, the model_id is just a hint; FauxProvider ignores it
+
+        # Auto-build ToolRegistry from the `tools` preset
+        tool_registry = None
+        if spec.tools == "coding":
+            from pharos.entities.tools import ToolRegistry
+            from pharos.entities.tools_coding import register_coding_tools
+
+            tool_registry = ToolRegistry()
+            register_coding_tools(tool_registry)
+        elif spec.tools == "builtin":
+            from pharos.entities.tools import ToolRegistry
+            from pharos.entities.tools_builtins import register_builtins
+
+            tool_registry = ToolRegistry()
+            register_builtins(tool_registry)
+
         cfg = LLMEntityConfig(
             provider_class=provider_class,
             provider_kwargs=dict(spec.params),
@@ -175,6 +195,8 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
             temperature=spec.temperature,
             max_tokens=spec.max_tokens,
             thinking_level=spec.thinking_level,  # type: ignore[arg-type]
+            tool_registry=tool_registry,
+            max_tool_iterations=spec.max_tool_iterations,
         )
         return LLMAgent(node_id=nid, config=cfg)
 

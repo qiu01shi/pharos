@@ -69,6 +69,7 @@ class FNDirector:
                     run_id=ctx.run_id,
                     step_id=f"{ctx.run_id}:{step_counter}",
                     iter=layer_idx,
+                    granted_permissions=getattr(ctx, "granted_permissions", set()),
                 )
                 tasks.append(
                     asyncio.create_task(

@@ -63,6 +63,9 @@ class FireContext:
     step_id: str
     iter: int = 0
     started_at: float = field(default_factory=time.time)
+    # Permissions propagated from RunContext so entities can
+    # check tool permissions during fire().
+    granted_permissions: set[str] = field(default_factory=set)
 
 
 @dataclass

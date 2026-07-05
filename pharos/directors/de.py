@@ -77,6 +77,7 @@ class DEDirector:
                         run_id=ctx.run_id,
                         step_id=f"{ctx.run_id}:{step_counter + 1}",
                         iter=it,
+                        granted_permissions=getattr(ctx, "granted_permissions", set()),
                     )
                     tasks.append(
                         asyncio.create_task(

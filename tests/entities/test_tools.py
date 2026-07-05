@@ -21,9 +21,9 @@ class TestToolRegistry:
         )
         tools = reg.list_tools()
         assert len(tools) == 1
-        assert tools[0]["name"] == "greet"
-        assert tools[0]["description"] == "Say hi."
-        assert tools[0]["parameters"]["properties"]["name"]["type"] == "string"
+        assert tools[0].name == "greet"
+        assert tools[0].description == "Say hi."
+        assert tools[0].parameters["properties"]["name"]["type"] == "string"
 
     async def test_execute_success(self):
         reg = ToolRegistry()
@@ -136,7 +136,7 @@ class TestBuiltins:
     def test_register_all(self):
         reg = ToolRegistry()
         register_builtins(reg)
-        names = {t["name"] for t in reg.list_tools()}
+        names = {t.name for t in reg.list_tools()}
         assert "echo" in names
         assert "get_time" in names
         assert "add_numbers" in names

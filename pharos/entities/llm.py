@@ -140,12 +140,10 @@ class LLMAgent(Entity):
         if sys_override:
             system_prompt = "".join(t.value.payload for t in sys_override)
 
-        # Build the tool spec (combine configured tools + registry).
-        # `config.tools` is a list of pharos.llm.types.Tool objects.
-        # `tool_registry.list_tools()` returns dicts. We use only
-        # the registry's tools if present, otherwise fall back to
-        # the configured tools.
-        context_tools = self.config.tools or []
+        # Build the tool spec. ToolRegistry.list_tools() returns
+        # list[Tool] (pharos.llm.types.Tool), which is what
+        # Context.tools and providers expect.
+        context_tools: list[Any] = self.config.tools or []
         if self.config.tool_registry is not None:
             context_tools = self.config.tool_registry.list_tools()
 
@@ -242,21 +240,28 @@ class LLMAgent(Entity):
                 # surface them but don't execute.
                 break
 
-            for tc in tool_calls_this_round:
-                if span is not None:
+            # Execute all tool calls in this round in parallel.
+            tool_call_dicts = [
+                {"name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id}
+                for tc in tool_calls_this_round
+            ]
+            if span is not None:
+                for tc in tool_calls_this_round:
                     span.events.append(
                         _SpanEvent(
                             name="tool.execute.start",
                             ts=time.time(),
-                            attributes={"tool_name": tc.name, "arguments": tc.arguments},
+                            attributes={
+                                "tool_name": tc.name,
+                                "arguments": tc.arguments,
+                            },
                         )
                     )
-                result = await self.config.tool_registry.execute(
-                    tc.name,
-                    tc.arguments,
-                    tool_call_id=tc.id,
-                    granted_permissions=granted,
-                )
+            results = await self.config.tool_registry.execute_batch(
+                tool_call_dicts,
+                granted_permissions=granted,
+            )
+            for tc, result in zip(tool_calls_this_round, results, strict=True):
                 if span is not None:
                     span.events.append(
                         _SpanEvent(

@@ -1,0 +1,21 @@
+name: coding-agent
+director: fn
+
+nodes:
+  - id: coder
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: |
+      You are a coding agent. You have access to tools:
+      bash, read, write, edit, delete, glob, grep.
+
+      When asked to work with files, USE the tools.
+      Be concise in your responses.
+    max_tokens: 1000
+    tools: coding
+    max_tool_iterations: 10
+
+edges:
+  - { src: __in__.prompt, dst: coder.prompt }
+  - { src: coder.text,    dst: __out__.response }
