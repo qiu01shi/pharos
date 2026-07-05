@@ -36,9 +36,13 @@ class Token:
     """Single unit of data flowing between entities.
 
     Hash chain:
-        self_hash = sha256(serialize(value) + prev_hash + ts + origin)
+        self_hash = sha256(serialize(value) + origin + prev_hash + iter)
     The chain lets a Director prove "this run produced the same outputs
     as that run" by comparing head hashes — without re-running the LLM.
+    Wall-clock ``ts`` and ``run_id`` are deliberately excluded from the
+    hash so the same payload produced by the same node hashes identically
+    across runs; that cross-run stability is what makes drift detection
+    and a byte-stable ``chain_digest`` possible.
     """
 
     value: TypedValue
@@ -58,14 +62,18 @@ class Token:
             object.__setattr__(self, "self_hash", self._compute_hash())
 
     def _compute_hash(self) -> str:
-        """Stable canonical hash. Order-independent for dicts in payload."""
+        """Stable canonical hash. Order-independent for dicts in payload.
+
+        Excludes ``ts`` and ``run_id`` on purpose: identity is content +
+        lineage (``type``, ``payload``, ``origin``, ``prev_hash``, ``iter``),
+        never wall-clock time, so re-running the same graph with the same
+        input reproduces the same hashes.
+        """
         canonical = {
             "type": self.value.type,
             "payload": _canonical(self.value.payload),
             "origin": self.origin,
-            "ts": round(self.ts, 6),  # avoid float noise
             "prev_hash": self.prev_hash,
-            "run_id": self.run_id,
             "iter": self.iter,
         }
         raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str)

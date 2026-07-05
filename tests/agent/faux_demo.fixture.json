@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "name": "faux-demo",
+  "graph_path": "graphs/03_faux_demo.yaml",
+  "graph_sha256": "a3694be6179f8b80d45ae756cfbd5073d561542a805df16fc1daa66e3a013021",
+  "director": "fn",
+  "seed": {
+    "prompt": "say hi"
+  },
+  "grant": [],
+  "var": {},
+  "outputs": {
+    "agent:0": [
+      {
+        "port": "text",
+        "type": "text",
+        "payload": "echo: say hi",
+        "self_hash": "18a1319d26b751df",
+        "prev_hash": "9258c55b0c82cba2",
+        "origin": "agent.text"
+      },
+      {
+        "port": "draft",
+        "type": "text",
+        "payload": "echo: say hi",
+        "self_hash": "0eca20d7d290e1bd",
+        "prev_hash": "9258c55b0c82cba2",
+        "origin": "agent.draft"
+      },
+      {
+        "port": "usage",
+        "type": "json",
+        "payload": {
+          "input": 50,
+          "output": 50,
+          "cache_read": 0,
+          "cache_write": 0,
+          "total": 100
+        },
+        "self_hash": "1cbfecef1b94a8d1",
+        "prev_hash": "9258c55b0c82cba2",
+        "origin": "agent.usage"
+      }
+    ],
+    "__out__:0": [
+      {
+        "port": "response",
+        "type": "text",
+        "payload": "echo: say hi",
+        "self_hash": "18a1319d26b751df",
+        "prev_hash": "9258c55b0c82cba2",
+        "origin": "agent.text"
+      }
+    ]
+  },
+  "chain_digest": "806cfca65dc9bf79f6aba92f619f0cf53c1d6ea172985998efc5cf91f697a6c6",
+  "assertions": [
+    {
+      "target": "__out__.response",
+      "op": "contains",
+      "value": "echo",
+      "policy": "pinned"
+    },
+    {
+      "target": "agent.usage",
+      "op": "schema",
+      "value": {
+        "type": "object",
+        "required": [
+          "input",
+          "output",
+          "total"
+        ]
+      },
+      "policy": "pinned"
+    }
+  ]
+}

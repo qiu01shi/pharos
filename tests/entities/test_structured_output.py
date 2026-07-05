@@ -54,7 +54,12 @@ class TestPortSchema:
 # ---------- LLMAgent structured output ----------
 
 
-def _agent(scripted: list[str], *, on_invalid: str = "raise") -> LLMAgent:
+def _agent(
+    scripted: list[str],
+    *,
+    on_invalid: str = "raise",
+    max_repair_attempts: int = 0,
+) -> LLMAgent:
     cfg = LLMEntityConfig(
         provider_class=FauxProvider,  # type: ignore[arg-type]
         provider_kwargs={
@@ -67,6 +72,7 @@ def _agent(scripted: list[str], *, on_invalid: str = "raise") -> LLMAgent:
         model_id="faux-fast",
         output_schema=_SCHEMA,
         on_invalid=on_invalid,
+        max_repair_attempts=max_repair_attempts,
     )
     return LLMAgent("ex", cfg)
 
@@ -113,6 +119,58 @@ class TestLLMAgentStructured:
         err = agent.outs["error"].peek_all()
         assert len(err) == 1
         assert "structured output invalid" in err[0].value.payload
+
+
+class TestSelfHeal:
+    """max_repair_attempts feeds the schema error back into the same call."""
+
+    async def test_repair_recovers_within_single_fire(self):
+        # First response is invalid; the repair round gets the valid one.
+        agent = _agent(
+            ["not json", '{"file": "a.py", "line": 5}'], max_repair_attempts=2
+        )
+        await _drive(agent)
+        out = agent.outs["json"].peek_all()
+        assert out[0].value.payload == {"file": "a.py", "line": 5}
+        assert agent.repair_attempts_used == 1
+
+    async def test_repair_recovers_from_schema_mismatch(self):
+        # Parses as JSON but wrong shape, then a corrected shape.
+        agent = _agent(
+            ['{"file": "a.py"}', '{"file": "a.py", "line": 9}'],
+            max_repair_attempts=1,
+        )
+        await _drive(agent)
+        assert agent.outs["json"].peek_all()[0].value.payload["line"] == 9
+        assert agent.repair_attempts_used == 1
+
+    async def test_repair_exhausted_then_raises(self):
+        agent = _agent(["bad", "still bad", "nope"], max_repair_attempts=2)
+        with pytest.raises(PortContractViolation):
+            await _drive(agent)
+        assert agent.repair_attempts_used == 2
+
+    async def test_repair_exhausted_error_port(self):
+        agent = _agent(
+            ["bad", "bad2", "bad3"],
+            on_invalid="error_port",
+            max_repair_attempts=2,
+        )
+        await _drive(agent)
+        assert agent.outs["error"].peek_all()
+        assert agent.repair_attempts_used == 2
+
+    async def test_disabled_by_default_keeps_old_behavior(self):
+        # max_repair_attempts=0 -> first invalid raises immediately, no repair.
+        agent = _agent(["bad", "good would be here"], max_repair_attempts=0)
+        with pytest.raises(PortContractViolation):
+            await _drive(agent)
+        assert agent.repair_attempts_used == 0
+
+    async def test_valid_first_time_uses_no_repair(self):
+        agent = _agent(['{"file": "a.py", "line": 1}'], max_repair_attempts=3)
+        await _drive(agent)
+        assert agent.repair_attempts_used == 0
 
 
 # ---------- composition with RetryEntity through a Director ----------

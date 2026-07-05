@@ -2,7 +2,7 @@
 
 > **Typed dataflow runtime for LLM workflows — with first-class trace, replay, and permissions.**
 
-pharos turns a multi-step LLM workflow into a **typed dataflow graph**: nodes are LLM calls / shell commands / Python code, edges are typed ports, and a **Director** drives the firing cycle. Every fire is wrapped in a span, every token is hash-chained, and replays reproduce a run **byte-for-byte** with zero network calls.
+pharos turns a multi-step LLM workflow into a **typed dataflow graph**: nodes are LLM calls / shell commands / Python code, edges are typed ports, and a **Director** drives the firing cycle. Every fire is wrapped in a span, every token is content-hashed into a lineage chain, and runs are **recorded and replayed** with zero network calls — so a run becomes a regression artifact you can **test** and **diff** like code.
 
 Built to answer two real pain points:
 
@@ -115,6 +115,9 @@ pharos/
 - ✅ **Tools as first-class nodes** — `type: tool` schedules a single tool as a graph node with typed ports and its own RBAC
 - ✅ **Retry with backoff** — add `retry: { max_attempts, backoff_s }` to any node to re-fire it on failure (wraps the node in a `RetryEntity`)
 - ✅ **General record/replay** — every entity's output tokens (shell / python / tool / subgraph, not just LLM) are captured and re-emitted for byte-equal offline replay
+- ✅ **Agent CI — `pharos test`** — record a golden run as a fixture, then gate it: offline replay recomputes a `chain_digest` and re-checks assertions (zero network, per-commit), or `--live` re-runs the real model and judges drift; `--junit` for CI
+- ✅ **Agent CI — `pharos diff`** — structurally diff two runs aligned by node/fire/port (JSON field paths, text line diffs) with downstream propagation, instead of an opaque blob compare
+- ✅ **Structured-output self-heal** — set `max_repair_attempts` on an LLM node to feed the schema error back into the same conversation and re-ask before falling back to `on_invalid`
 - ✅ **Resume partial runs** — `pharos resume <run_id> --graph <yaml>` replays completed fires and runs the rest live (checkpoint without re-doing finished work)
 - ✅ **Run-level budgets** — YAML `budget:` or `--max-cost` / `--max-tokens` abort (or warn) when spend exceeds the cap
 - ✅ **Human-in-the-loop** — `type: human` pauses for approval/input, RBAC-gated (`human:input`), trace-recorded; continue with `--answer node=value` or `pharos resume`
@@ -164,7 +167,42 @@ uv run pharos run graphs/10_structured.yaml --input "bug in main.py line 42"
 
 # 7. Query run history across sessions
 uv run pharos trace query --entity coder --min-cost 0.001
+
+# 8. Agent CI — record a golden fixture, then gate it in CI
+uv run pharos run graphs/03_faux_demo.yaml --input "say hi" \
+    --record-fixture tests/agent/faux_demo.fixture.json --fixture-name faux-demo
+uv run pharos test tests/agent/faux_demo.fixture.json          # offline, zero cost
+uv run pharos test tests/agent/ --junit report.xml             # gate a directory
+uv run pharos test tests/agent/faux_demo.fixture.json --live   # re-run real model, judge drift
+
+# 9. Diff two runs structurally (node/port aligned, not an opaque blob)
+uv run pharos diff <run_a> <run_b>
 ```
+
+---
+
+## Agent CI: test and diff your agents
+
+Multi-step agents have no unit tests and no `git diff`. pharos adds both,
+building on two primitives it already has — typed ports and record/replay.
+
+- **`pharos test`** turns a confirmed-good run into a golden **fixture** (graph
+  hash, seed, recorded outputs, a content `chain_digest`, and assertions). CI
+  replays it **offline** (zero network, per commit) and fails if the digest
+  drifts or an assertion breaks; `--live` re-runs the real model and judges
+  **drift** (a difference is not automatically a failure — see below).
+- **`pharos diff`** aligns two runs by `node:fire.port` and shows exactly what
+  changed — a JSON field path (`patch.line: 42 → 43`), a text line diff, a
+  dropped tool call — and how it propagates downstream.
+
+**Difference ≠ drift.** The live verdict fails only on things you declared you
+care about: structural/behavioral invariants (tool-call set changed, an output
+port appeared/disappeared, a JSON output's *shape* changed, or self-heal
+`repair_attempts` rose) and your assertions (`equals` / `contains` /
+`not_contains` / `regex` / `schema`). Pure wording changes are reported but do
+not fail the gate. Re-bless a golden with `pharos test <fx> --live --update`.
+
+Wire it into GitHub Actions with [.github/workflows/agent-ci.yml](.github/workflows/agent-ci.yml).
 
 ---
 
@@ -266,19 +304,20 @@ The dataflow runtime has near-zero overhead — 90 concurrent entities finish in
 | CI / quality | GitHub Actions (3.11/3.12): ruff + mypy (0 errors, gating) + pytest with coverage floor | ✅ |
 | Resilience / obs | `RetryEntity` (`retry:` block) + OTLP/JSON trace export (`trace --otlp`, `post_otlp`) | ✅ |
 | Packaging | v0.2.0, hatchling wheel + sdist, trusted-publishing workflow (TestPyPI / PyPI) | ✅ |
-| Typed contracts | JSON Schema on ports + `output_schema` structured LLM output (`json` port, `retry:` repair loop) | ✅ |
+| Typed contracts | JSON Schema on ports + `output_schema` structured LLM output (`json` port) + `max_repair_attempts` self-heal | ✅ |
 | Resume | `pharos resume` — replay completed fires, run the rest live; subgraph `ref_sha` integrity pin | ✅ |
 | Governance | Run-level budgets (`budget:` / `--max-cost`) + `HumanEntity` (`human:input`, pause/resume) | ✅ |
 | Trace index | `SQLiteTraceBackend` + `pharos trace query` cross-session run history | ✅ |
+| Agent CI | `pharos test` (golden fixtures, offline replay gate + `--live` drift + `--junit`) and `pharos diff` (structured node/port diff); cross-run-stable token hash chain | ✅ |
 
 **Numbers**:
-- 387 tests (2 integration skipped without API key), 0 lint errors, 0 mypy errors
-- CI gate on Python 3.11 + 3.12: ruff + mypy + pytest, coverage gate at 78% (actual ~82%)
+- 430 tests (2 integration skipped without API key), 0 lint errors, 0 mypy errors
+- CI gate on Python 3.11 + 3.12: ruff + mypy + pytest, coverage gate at 78%
 - 100 concurrent actors: P95 ≈ 10ms
 - 6 LLM providers + ReplayProvider
 - 3 Directors: FN / SDF / DE
 - 9 built-in Entities: `LLMAgent`, `ShellEntity`, `Router`, `Memory`, `HumanEntity`, `ToolEntity`, `SubgraphEntity`, `RetryEntity` + custom Python — plus ToolRegistry (7 coding tools)
-- 7 CLI subcommands: run / validate / list-providers / doctor / trace / replay / resume
+- 9 CLI subcommands: run / validate / list-providers / doctor / trace / replay / resume / test / diff
 
 ---
 
@@ -313,10 +352,11 @@ pharos/
 │   ├── observability/    Trace / SQLite index / OTLP export / TUI viewer
 │   ├── ir/               YAML graph loader (Pydantic schema)
 │   ├── runtime/          Trace persistence + record/replay + resume
+│   ├── testing/          Agent CI: chain_digest / structured diff / fixtures / gate runner
 │   ├── env.py            Auto-load ~/.pharos/.env
-│   └── cli.py            `pharos` command (run / validate / list-providers / doctor / trace / replay / resume)
+│   └── cli.py            `pharos` command (run / validate / list-providers / doctor / trace / replay / resume / test / diff)
 ├── graphs/               Sample workflows (structured output, human gate, subgraph, retry, etc.)
-├── tests/                387 tests across ~25 modules
+├── tests/                430 tests across ~28 modules
 ├── bench/                Performance baselines (hello_world.py)
 ├── scripts/              End-to-end verification scripts
 └── docs/                 Architecture / quickstart / cookbook + 9 phase retrospectives

@@ -64,6 +64,11 @@ class LLMEntityConfig:
     #   "error_port" -> emit the failure message on the `error` port instead
     output_schema: dict[str, Any] | None = None
     on_invalid: str = "raise"
+    # Self-heal: on a schema-invalid response, feed the validation error back
+    # into the SAME conversation and ask the model to return corrected JSON,
+    # up to this many times before falling back to `on_invalid`. 0 = disabled
+    # (validate once, then apply on_invalid — the historical behavior).
+    max_repair_attempts: int = 0
 
     def __post_init__(self) -> None:
         if self.tools is None:
@@ -128,6 +133,9 @@ class LLMAgent(Entity):
         # total_tokens / total_cost.
         self.total_tokens: int = 0
         self.total_cost: float = 0.0
+        # How many self-heal repair rounds the last fire() consumed. Exposed so
+        # Agent CI can treat a rise (e.g. 0 -> 3) as a structural drift signal.
+        self.repair_attempts_used: int = 0
 
     async def setup(self, ctx) -> None:
         # Construct the provider (this may fail if API key is missing;
@@ -344,6 +352,70 @@ class LLMAgent(Entity):
                         is_error=result.is_error,
                     )
                 )
+        # Structured output: validate and, if enabled, self-heal by feeding the
+        # schema error back into the same conversation before falling back to
+        # on_invalid. Runs after the tool loop so `accumulated` is the final
+        # answer. total_usage keeps accruing across repair rounds.
+        self.repair_attempts_used = 0
+        parsed: Any = None
+        reason = ""
+        if self.config.output_schema is not None:
+            parsed, reason = self._validate_structured(accumulated)
+            while reason and self.repair_attempts_used < self.config.max_repair_attempts:
+                self.repair_attempts_used += 1
+                if span is not None:
+                    span.record_event(
+                        "structured.repair",
+                        {"attempt": self.repair_attempts_used, "error": reason},
+                    )
+                messages.append(
+                    _AM(
+                        content=[TextContent(text=accumulated)],
+                        api="",
+                        provider="",
+                        model="",
+                    )
+                )
+                messages.append(
+                    UserMessage(
+                        content=(
+                            "Your previous response did not match the required "
+                            f"JSON Schema. Error: {reason}. Reply with ONLY the "
+                            "corrected JSON — no prose, no markdown fences."
+                        )
+                    )
+                )
+                repair_ctx = Context(
+                    system_prompt=system_prompt,
+                    messages=list(messages),
+                    tools=context_tools,
+                )
+                (
+                    r_text,
+                    _r_think,
+                    _r_tcs,
+                    r_usage,
+                    r_error,
+                    r_final,
+                ) = await self._stream_one_round(repair_ctx, options, span)
+                if r_usage.input or r_usage.output:
+                    total_usage = Usage(
+                        input=total_usage.input + r_usage.input,
+                        output=total_usage.output + r_usage.output,
+                        cache_read=total_usage.cache_read + r_usage.cache_read,
+                        cache_write=total_usage.cache_write + r_usage.cache_write,
+                        cache_write_1h=(
+                            total_usage.cache_write_1h + r_usage.cache_write_1h
+                        ),
+                    )
+                if r_error:
+                    reason = r_error
+                    break
+                candidate = r_final or r_text
+                if candidate:
+                    accumulated = candidate
+                parsed, reason = self._validate_structured(accumulated)
+
         # Final outputs. The raw text is always emitted (useful for tracing
         # and debugging); structured output is emitted separately on `json`.
         if accumulated:
@@ -351,7 +423,7 @@ class LLMAgent(Entity):
                 TypedValue(type="text", payload=accumulated)
             )
         if self.config.output_schema is not None:
-            self._emit_structured(accumulated)
+            self._route_structured(parsed, reason)
         if accumulated_thinking:
             self.outs["thinking"].emit(
                 TypedValue(type="text", payload=accumulated_thinking)
@@ -371,17 +443,20 @@ class LLMAgent(Entity):
                 )
             )
         if total_usage.input or total_usage.output:
+            usage_payload: dict[str, Any] = {
+                "input": total_usage.input,
+                "output": total_usage.output,
+                "cache_read": total_usage.cache_read,
+                "cache_write": total_usage.cache_write,
+                "total": total_usage.total,
+            }
+            # Only structured-output agents report repair rounds, so agents
+            # without a schema keep their historical usage payload (and digest).
+            # Agent CI treats a rise here as a behavioral drift signal.
+            if self.config.output_schema is not None:
+                usage_payload["repair_attempts"] = self.repair_attempts_used
             self.outs["usage"].emit(
-                TypedValue(
-                    type="json",
-                    payload={
-                        "input": total_usage.input,
-                        "output": total_usage.output,
-                        "cache_read": total_usage.cache_read,
-                        "cache_write": total_usage.cache_write,
-                        "total": total_usage.total,
-                    },
-                )
+                TypedValue(type="json", payload=usage_payload)
             )
 
         # Update cumulative token/cost for the Director to read.
@@ -392,8 +467,26 @@ class LLMAgent(Entity):
                 + total_usage.output * self.model.cost.output) / 1_000_000
         self.total_cost += cost
 
-    def _emit_structured(self, text: str) -> None:
-        """Parse `text` as JSON, validate against the schema, and route it.
+    def _validate_structured(self, text: str) -> tuple[Any, str]:
+        """Parse `text` as JSON and validate it against the output schema.
+
+        Pure: returns ``(parsed, reason)`` where ``reason == ""`` means valid.
+        A non-empty reason is the parse/schema error, used both to steer a
+        self-heal repair round and, if repair is exhausted, as the on_invalid
+        failure message.
+        """
+        assert self.config.output_schema is not None
+        try:
+            parsed = self._extract_json(text)
+        except ValueError as exc:
+            return None, str(exc)
+        errors = _validate_schema(parsed, self.config.output_schema)
+        if errors:
+            return parsed, "; ".join(errors)
+        return parsed, ""
+
+    def _route_structured(self, parsed: Any, reason: str) -> None:
+        """Emit the validated object, or apply ``on_invalid`` on failure.
 
         On success the parsed object is emitted on the `json` port (which
         re-validates the shape as a boundary guarantee). On failure the
@@ -403,21 +496,9 @@ class LLMAgent(Entity):
           * "error_port" -> emit the failure message on the `error` port,
             letting a downstream Router branch on it.
         """
-        assert self.config.output_schema is not None
-        reason: str
-        parsed: Any = None
-        try:
-            parsed = self._extract_json(text)
-        except ValueError as exc:
-            reason = str(exc)
-        else:
-            errors = _validate_schema(parsed, self.config.output_schema)
-            reason = "; ".join(errors)
-
         if not reason:
             self.outs["json"].emit(TypedValue(type="json", payload=parsed))
             return
-
         message = f"structured output invalid: {reason}"
         if self.config.on_invalid == "error_port":
             self.outs["error"].emit(TypedValue(type="text", payload=message))
