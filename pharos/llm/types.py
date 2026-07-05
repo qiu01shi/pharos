@@ -307,4 +307,8 @@ class StreamOptions(BaseModel):
     stop: list[str] | None = None
     thinking_level: Literal["off", "minimal", "low", "medium", "high"] | None = None
     cache_retention: Literal["short", "long"] = "short"
+    # JSON Schema (subset) the response must conform to. Providers with native
+    # structured output (OpenAI) enforce it server-side; others rely on the
+    # prompt nudge + LLMAgent's post-hoc validation.
+    response_schema: dict[str, Any] | None = None
     extra: dict[str, Any] = Field(default_factory=dict)

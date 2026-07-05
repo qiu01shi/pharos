@@ -1,0 +1,32 @@
+# Structured output: make "types cross LLM boundaries" literally true.
+#
+# The `output_schema` block declares the JSON shape the LLM must produce. The
+# validated object is emitted on the node's `json` port; if the response does
+# not parse/validate, the fire raises — and the `retry:` block re-fires the
+# node so the model gets another chance to comply.
+#
+# This is the composition the design promises: schema validation + retry, with
+# no changes to the Director (both go through the shared safe_fire path).
+#
+# Run (any provider works; a real model will return conforming JSON):
+#   uv run pharos run graphs/10_structured.yaml --input "Extract: bug in main.py line 42"
+name: structured-demo
+director: fn
+nodes:
+  - id: extractor
+    type: llm
+    provider: minimax
+    model: MiniMax-Text-01
+    system: "Extract the file and line number the user mentions."
+    max_tokens: 200
+    on_invalid: raise
+    retry: { max_attempts: 3, backoff_s: 0.2 }
+    output_schema:
+      type: object
+      required: [file, line]
+      properties:
+        file: { type: string }
+        line: { type: integer }
+edges:
+  - { src: __in__.prompt, dst: extractor.prompt }
+  - { src: extractor.json, dst: __out__.result }

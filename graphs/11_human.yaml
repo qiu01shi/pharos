@@ -1,0 +1,27 @@
+# Human-in-the-loop: gate a run on a person's approval.
+#
+# The `human` node pauses the run until an answer is available. Supply it
+# up-front with `--answer gate=<text>`, interactively (interactive: true on a
+# TTY), or pause-and-resume: run once (it stops at the gate and records what
+# completed), then continue with:
+#   pharos resume <run_id> --graph graphs/11_human.yaml --grant human:execute \
+#       --grant human:input --answer gate=approved
+#
+# RBAC: the human node requires `human:input`, so the run must grant it.
+#
+# Run (non-interactive, pre-answered):
+#   pharos run graphs/11_human.yaml --input "Deploy to prod?" \
+#       --grant human:input --grant shell:execute --answer gate=approved
+name: human-demo
+director: fn
+nodes:
+  - id: gate
+    type: human
+    interactive: true
+  - id: apply
+    type: shell
+    timeout: 30
+edges:
+  - { src: __in__.prompt, dst: gate.prompt }
+  - { src: gate.response, dst: apply.command }
+  - { src: apply.stdout,  dst: __out__.result }

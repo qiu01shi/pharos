@@ -30,6 +30,63 @@ from pharos.core.graph import CompositeGraph
 from pharos.core.permissions import PermissionPolicy
 
 
+class BudgetExceededError(Exception):
+    """Raised when a run exceeds its cost/token budget in ``hard`` mode."""
+
+
+@dataclass
+class RunBudget:
+    """A run-level spend cap enforced uniformly in ``safe_fire``.
+
+    Governance in pharos has two axes: RBAC decides *what* a run may do;
+    a budget decides *how much*. After each fire, its (tokens, cost) are
+    charged here. ``hard`` mode aborts the run once a limit is crossed;
+    ``soft`` mode only annotates the trace with a ``budget.exceeded`` event
+    and lets the run finish.
+    """
+
+    max_tokens: int | None = None
+    max_cost_usd: float | None = None
+    mode: str = "hard"  # "hard" aborts; "soft" warns via a trace event
+    spent_tokens: int = 0
+    spent_cost: float = 0.0
+    exceeded: bool = False
+
+    def charge(self, tokens: int, cost: float, span: Any = None) -> None:
+        """Add a fire's usage and enforce the cap (raise in hard mode)."""
+        self.spent_tokens += tokens
+        self.spent_cost += cost
+        reason = self._over_limit()
+        if reason is None:
+            return
+        self.exceeded = True
+        if span is not None:
+            span.record_event(
+                "budget.exceeded",
+                {
+                    "reason": reason,
+                    "spent_tokens": self.spent_tokens,
+                    "spent_cost_usd": round(self.spent_cost, 6),
+                    "mode": self.mode,
+                },
+            )
+        if self.mode == "hard":
+            raise BudgetExceededError(reason)
+
+    def _over_limit(self) -> str | None:
+        if self.max_tokens is not None and self.spent_tokens > self.max_tokens:
+            return f"tokens {self.spent_tokens} > budget {self.max_tokens}"
+        if (
+            self.max_cost_usd is not None
+            and self.spent_cost > self.max_cost_usd
+        ):
+            return (
+                f"cost ${self.spent_cost:.6f} > "
+                f"budget ${self.max_cost_usd:.6f}"
+            )
+        return None
+
+
 @dataclass
 class RunContext:
     """Per-run context set by a Director before setup().
@@ -60,6 +117,7 @@ class RunContext:
     tracer: Any = None  # observability.trace.Tracer
     recorder: Any = None  # runtime.RunRecorder — captures entity outputs
     replayer: Any = None  # runtime.RunReplayer — replays recorded outputs
+    budget: RunBudget | None = None  # optional run-level spend cap
 
     def policy(self) -> PermissionPolicy:
         """The authorisation policy for this run (from granted_permissions)."""
@@ -169,19 +227,30 @@ async def safe_fire(
     replayer = getattr(run_ctx, "replayer", None)
     recorder = getattr(run_ctx, "recorder", None)
 
-    # In replay mode the entity never executes, so it needs neither a
-    # permission grant nor setup() (which might create clients / need an
-    # API key). Only live runs are gated and set up.
-    if replayer is None:
-        check_permissions(entity, run_ctx)
-        if not getattr(entity, "_initialized", False):
-            await entity.setup(run_ctx)
-            entity._initialized = True
-
     # Stable per-entity fire index so record/replay keys line up even when
     # a node fires many times (SDF/DE iterations).
     fire_index: int = getattr(entity, "_fire_count", 0)
     entity._fire_count = fire_index + 1
+
+    # Decide, for THIS fire, whether to replay a recorded output or run live:
+    #   * no replayer                       -> live
+    #   * replayer has this fire recorded    -> replay (never executes)
+    #   * replayer in resume mode, no record -> live (continue past checkpoint)
+    #   * replayer, not resume, no record    -> skip (pure replay emits nothing)
+    replay_this = replayer is not None and replayer.has(
+        entity.node_id, fire_index
+    )
+    live = replayer is None or (
+        getattr(replayer, "resume", False) and not replay_this
+    )
+
+    # Live fires are permission-gated and set up; replayed fires are not
+    # (they never execute, so they need no client / API key / grant).
+    if live:
+        check_permissions(entity, run_ctx)
+        if not getattr(entity, "_initialized", False):
+            await entity.setup(run_ctx)
+            entity._initialized = True
 
     tracer = getattr(run_ctx, "tracer", None)
     fire_ctx.tracer = tracer
@@ -204,17 +273,23 @@ async def safe_fire(
             },
         )
 
+    metrics = (0, 0.0)
     try:
-        if replayer is not None:
-            # Replay mode: never execute. Re-emit recorded outputs if this
-            # fire was recorded; otherwise emit nothing (a node whose fire
-            # was not recorded simply produces no tokens on replay).
-            if replayer.has(entity.node_id, fire_index):
-                replayer.apply(entity, entity.node_id, fire_index)
-        else:
+        if replay_this:
+            # Re-emit recorded outputs; the entity never executes.
+            assert replayer is not None
+            replayer.apply(entity, entity.node_id, fire_index)
+        elif live:
             await entity.fire(fire_ctx)
+        # else: pure-replay of a fire with no recorded output -> emit nothing.
         if recorder is not None:
             recorder.capture(entity, entity.node_id, fire_index)
+        # Metrics + budget are charged inside the try so a hard-budget abort
+        # can annotate this fire's span before it closes.
+        metrics = collect_metrics(entity)
+        budget = getattr(run_ctx, "budget", None)
+        if budget is not None:
+            budget.charge(metrics[0], metrics[1], span=span)
     except BaseException as e:
         if span is not None:
             span.record_exception(e)
@@ -223,7 +298,7 @@ async def safe_fire(
         if span is not None and tracer is not None:
             tracer.finish_span(span)
 
-    return collect_metrics(entity)
+    return metrics
 
 
 def collect_metrics(entity: Any) -> tuple[int, float]:

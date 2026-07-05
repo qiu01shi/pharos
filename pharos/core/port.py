@@ -14,19 +14,21 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
+from pharos.core.schema import validate as _validate_schema
 from pharos.core.token import Token, TypedValue
 
 OverflowStrategy = Literal["backpressure", "drop_oldest", "drop_newest"]
 
 
 class PortContractViolation(Exception):
-    """Raised when a token's type doesn't match a port's accepted types.
+    """Raised when a token violates a port's contract.
 
     This is the primary defense against LLM hallucinations propagating
     downstream. LLM outputs are untyped; the receiving port enforces
-    the contract.
+    the contract — first the coarse `type` tag, then (for `json` payloads
+    with a declared `schema`) the payload *shape*.
     """
 
 
@@ -46,6 +48,10 @@ class _PortBase:
     total_received: int = 0
     total_emitted: int = 0
     total_dropped: int = 0
+    # Optional JSON Schema (subset) applied to `json`-typed payloads. When
+    # set, a token whose payload doesn't match the shape is rejected — this
+    # turns the coarse `type: json` tag into an enforced structural contract.
+    schema: dict[str, Any] | None = None
 
     def _check_type(self, value: TypedValue) -> None:
         if self.accepted_types and value.type not in self.accepted_types:
@@ -53,6 +59,13 @@ class _PortBase:
                 f"port {self.name!r} accepts {self.accepted_types}, "
                 f"got {value.type!r}"
             )
+        if self.schema is not None and value.type == "json":
+            errors = _validate_schema(value.payload, self.schema)
+            if errors:
+                raise PortContractViolation(
+                    f"port {self.name!r} schema violation: "
+                    f"{'; '.join(errors)}"
+                )
 
     def _enqueue(self, token: Token) -> None:
         if self.capacity is not None and len(self.buffer) >= self.capacity:

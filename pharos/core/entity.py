@@ -109,6 +109,7 @@ def _clone_port(port: _PortT) -> _PortT:
         accepted_types=list(port.accepted_types),
         capacity=port.capacity,
         overflow=port.overflow,
+        schema=port.schema,
     )
 
 
