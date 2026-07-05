@@ -284,8 +284,22 @@ class RunRecorder:
     later). The result is a provider-agnostic replay cache.
     """
 
-    def __init__(self) -> None:
-        self._data: dict[str, list[dict[str, Any]]] = {}
+    def __init__(
+        self,
+        prefix: str = "",
+        data: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
+        # `prefix` namespaces keys for nested (subgraph) runs, e.g.
+        # "reviewer/" -> "reviewer/coder:0". `data` lets a child recorder
+        # write into the parent's shared dict.
+        self.prefix = prefix
+        self._data: dict[str, list[dict[str, Any]]] = (
+            data if data is not None else {}
+        )
+
+    def child(self, prefix: str) -> RunRecorder:
+        """A recorder that writes into the same dict under a nested prefix."""
+        return RunRecorder(prefix=f"{self.prefix}{prefix}", data=self._data)
 
     def capture(self, entity: Any, node_id: str, fire_index: int) -> None:
         emitted: list[dict[str, Any]] = []
@@ -298,7 +312,7 @@ class RunRecorder:
                         "payload": tok.value.payload,
                     }
                 )
-        self._data[f"{node_id}:{fire_index}"] = emitted
+        self._data[f"{self.prefix}{node_id}:{fire_index}"] = emitted
 
     def to_dict(self) -> dict[str, list[dict[str, Any]]]:
         return dict(self._data)

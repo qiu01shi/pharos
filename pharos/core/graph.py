@@ -97,23 +97,48 @@ class CompositeGraph:
         self._nx.add_node(node_id)
 
     def add_subgraph(
-        self, node_id: str, subgraph: CompositeGraph, exports: dict[str, str]
+        self,
+        node_id: str,
+        subgraph: CompositeGraph,
+        director_name: str = "fn",
+        input_map: dict[str, str] | None = None,
+        output_map: dict[str, str] | None = None,
+        max_iters: int = 20,
+        converge_k: int = 2,
     ) -> None:
-        """Add a nested subgraph. `exports` maps public_name -> "node.port"."""
+        """Embed a nested graph as one composite node.
+
+        The subgraph is wrapped in a `SubgraphEntity` (stored as the node's
+        `instance`) so every Director schedules it like any other node. Its
+        public ports are derived from the child's `__in__` / `__out__` edges
+        unless `input_map` / `output_map` (public_name -> internal_port)
+        override them. `director_name` selects the child's own scheduler,
+        enabling heterogeneous nested scheduling.
+        """
         if node_id in self.nodes:
             raise ValueError(f"duplicate node id: {node_id!r}")
-        for public_name, internal in exports.items():
-            internal_node, _, internal_port = internal.partition(".")
-            if internal_node not in subgraph.nodes:
-                raise ValueError(
-                    f"export {public_name!r} references unknown node "
-                    f"{internal_node!r} in subgraph {subgraph.name!r}"
-                )
-            self.exports[public_name] = (node_id, internal_port)
+        # Lazy import: core must not import entities at module load time.
+        from pharos.entities.subgraph import SubgraphEntity
+
+        inst = SubgraphEntity(
+            node_id=node_id,
+            subgraph=subgraph,
+            director_name=director_name,
+            input_map=input_map,
+            output_map=output_map,
+            max_iters=max_iters,
+            converge_k=converge_k,
+        )
         self.nodes[node_id] = GraphNode(
-            id=node_id, kind=NodeKind.SUBGRAPH, subgraph=subgraph
+            id=node_id,
+            kind=NodeKind.SUBGRAPH,
+            instance=inst,
+            subgraph=subgraph,
         )
         self._nx.add_node(node_id)
+        # Record public output ports as exports for introspection.
+        for public, internal in inst._out_public_to_internal.items():
+            self.exports[public] = (node_id, internal)
 
     # ---------- edge management ----------
 

@@ -80,6 +80,11 @@ class FireContext:
     # Tracer propagated from RunContext so entities can open child spans
     # (e.g. LLMAgent tracing each tool execution as its own span).
     tracer: Any = None
+    # Record/replay services propagated so composite entities (e.g.
+    # SubgraphEntity) can recurse into a child run that participates in
+    # the same recording / replay session under a namespaced prefix.
+    recorder: Any = None
+    replayer: Any = None
 
     def policy(self) -> PermissionPolicy:
         """The authorisation policy for this fire (from granted_permissions)."""
@@ -180,6 +185,10 @@ async def safe_fire(
 
     tracer = getattr(run_ctx, "tracer", None)
     fire_ctx.tracer = tracer
+    # Expose record/replay services so composite entities can recurse
+    # into a child run under the same session.
+    fire_ctx.recorder = recorder
+    fire_ctx.replayer = replayer
     parent = current_span()
     span = None
     if tracer is not None:

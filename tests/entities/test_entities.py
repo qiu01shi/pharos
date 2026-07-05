@@ -29,7 +29,9 @@ class TestShellEntity:
         ))
         stdout = [t.value.payload for t in shell.outs["stdout"].peek_all()]
         exit_code = [t.value.payload for t in shell.outs["exit_code"].peek_all()]
-        assert stdout == ["hello-pharos\n"]
+        # Normalize trailing newline so this passes on both Unix (\n) and
+        # Windows (\r\n) shells.
+        assert [s.strip() for s in stdout] == ["hello-pharos"]
         assert exit_code == [0]
 
     async def test_nonzero_exit(self):

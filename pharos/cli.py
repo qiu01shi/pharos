@@ -96,7 +96,9 @@ def run(
 ) -> None:
     """Load a graph and run it once with --input as the initial prompt."""
     raw_text = _substitute_vars(graph, var)
-    g, raw = load_graph_from_text(raw_text)
+    # Pass the graph's directory so `type: subgraph` refs resolve relative
+    # to the main graph file.
+    g, raw = load_graph_from_text(raw_text, base_dir=Path(graph).parent)
     seed_map: dict[str, str] = {}
     if input:
         seed_map["prompt"] = input

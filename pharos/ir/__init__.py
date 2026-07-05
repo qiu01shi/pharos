@@ -93,6 +93,28 @@ class ToolNodeSpec(BaseModel):
     arg_key: str | None = None
 
 
+class SubgraphNodeSpec(BaseModel):
+    """Configuration for a `type: subgraph` node — embed another graph.
+
+    Example:
+        - id: reviewer
+          type: subgraph
+          ref: _reviewer_subgraph.yaml   # relative to this file
+          director: sdf                  # optional override of child's own
+          inputs: { prompt: prompt }     # optional public->internal rename
+          outputs: { verdict: verdict }
+    """
+
+    id: str
+    type: Literal["subgraph"] = "subgraph"
+    ref: str
+    director: str | None = None
+    inputs: dict[str, str] | None = None
+    outputs: dict[str, str] | None = None
+    max_iters: int = 20
+    converge_k: int = 2
+
+
 class PythonNodeSpec(BaseModel):
     """Configuration for a `type: python` node.
 
@@ -298,32 +320,74 @@ def _build_python_entity(nid: str, spec: PythonNodeSpec) -> Entity:
         return cls(node_id=nid)  # type: ignore[call-arg,abstract]
 
 
+def _add_subgraph_node(
+    parent: CompositeGraph,
+    node_raw: dict[str, Any],
+    base_dir: Path | None,
+    loading: frozenset[Path],
+) -> None:
+    """Resolve a `type: subgraph` node's `ref`, load the child graph, and
+    embed it via `parent.add_subgraph`. `base_dir` anchors relative refs;
+    `loading` carries the set of in-progress files for cycle detection.
+    """
+    spec = SubgraphNodeSpec.model_validate(node_raw)
+    ref = Path(spec.ref)
+    if not ref.is_absolute():
+        if base_dir is None:
+            raise ValueError(
+                f"subgraph node {spec.id!r}: relative ref {spec.ref!r} needs "
+                f"a base directory; load the parent graph from a file "
+                f"(or pass base_dir) so refs can be resolved"
+            )
+        ref = base_dir / ref
+    child_graph, child_raw = load_graph(ref, _loading=loading)
+    director = spec.director or child_raw.get("director", "fn")
+    parent.add_subgraph(
+        spec.id,
+        child_graph,
+        director_name=director,
+        input_map=spec.inputs,
+        output_map=spec.outputs,
+        max_iters=spec.max_iters,
+        converge_k=spec.converge_k,
+    )
+
+
 def load_graph_from_text(
     text: str,
+    base_dir: str | Path | None = None,
 ) -> tuple[CompositeGraph, dict[str, Any]]:
     """Like `load_graph` but from a string (after var substitution).
 
-    Returns (graph, raw_spec_dict).
+    `base_dir` anchors relative `type: subgraph` refs (the CLI passes the
+    main graph's directory). Returns (graph, raw_spec_dict).
     """
     raw = yaml.safe_load(text)
     if not isinstance(raw, dict):
         raise ValueError("graph YAML must be a mapping")
-    return load_graph_from_dict(raw)
+    bd = Path(base_dir) if base_dir is not None else None
+    return load_graph_from_dict(raw, base_dir=bd)
 
 
 def load_graph_from_dict(
     raw: dict[str, Any],
+    base_dir: Path | None = None,
+    _loading: frozenset[Path] = frozenset(),
 ) -> tuple[CompositeGraph, dict[str, Any]]:
     """Like `load_graph` but from an already-parsed dict.
 
-    Returns (graph, raw_spec_dict).
+    `base_dir` anchors relative subgraph refs; `_loading` tracks in-progress
+    files for cycle detection. Returns (graph, raw_spec_dict).
     """
     spec = GraphSpec.model_validate(raw)
 
     g = CompositeGraph(name=spec.name)
     for node_raw in spec.nodes:
-        entity = _build_entity(node_raw)
-        g.add_entity(entity.node_id, entity)
+        if node_raw.get("type") == "subgraph":
+            _add_subgraph_node(g, node_raw, base_dir, _loading)
+        else:
+            entity = _build_entity(node_raw)
+            g.add_entity(entity.node_id, entity)
 
     for e in spec.edges:
         g.connect(e.src, e.dst)
@@ -341,16 +405,27 @@ def load_graph_from_dict(
 
 def load_graph(
     path: str | Path,
+    _loading: frozenset[Path] = frozenset(),
 ) -> tuple[CompositeGraph, dict[str, Any]]:
     """Load a YAML graph spec into a CompositeGraph.
+
+    `_loading` tracks the set of files currently being loaded so nested
+    `type: subgraph` refs that form a cycle (A -> B -> A) fail with a clear
+    error instead of recursing forever.
 
     Returns (graph, raw_spec_dict). The raw dict is returned so the
     CLI can show validation messages with full context.
     """
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    p = Path(path).resolve()
+    if p in _loading:
+        chain = " -> ".join(str(x) for x in [*_loading, p])
+        raise ValueError(f"circular subgraph reference: {chain}")
+    raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: top-level must be a mapping")
-    return load_graph_from_dict(raw)
+    return load_graph_from_dict(
+        raw, base_dir=p.parent, _loading=_loading | {p}
+    )
 
 
 __all__ = [
@@ -359,6 +434,7 @@ __all__ = [
     "LLMNodeSpec",
     "PythonNodeSpec",
     "ShellNodeSpec",
+    "SubgraphNodeSpec",
     "ToolNodeSpec",
     "load_graph",
     "load_graph_from_dict",
