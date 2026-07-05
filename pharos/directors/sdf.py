@@ -86,7 +86,7 @@ class SDFDirector:
                 )
                 tasks = [
                     asyncio.create_task(
-                        safe_fire(graph.node(nid).instance, fire_ctx, ctx)  # type: ignore[arg-type]
+                        safe_fire(graph.node(nid).instance, fire_ctx, ctx)
                     )
                     for nid in all_nodes
                 ]

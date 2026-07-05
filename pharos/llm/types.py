@@ -284,7 +284,7 @@ class Model(BaseModel):
     base_url: str
     reasoning: bool = False
     input: list[Literal["text", "image"]] = Field(
-        default_factory=lambda: ["text"]  # type: ignore[arg-type, return-value]
+        default_factory=lambda: ["text"]  # type: ignore[arg-type]
     )
     cost: ModelCost
     context_window: int = 200_000

@@ -79,7 +79,7 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["aiosqlite", "yaml", "networkx"]
+module = ["yaml", "networkx"]
 ignore_missing_imports = true
 
 # Pydantic's BaseModel + Protocol interact poorly with mypy strict.

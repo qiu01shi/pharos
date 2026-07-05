@@ -48,30 +48,30 @@ class Router(Entity):
         # Re-declare ports on this instance
         for name in [*list(guards.keys()), self._default]:
             if name not in self.outs:
-                self.outs[name] = OutputPort(  # type: ignore[attr-defined]
+                self.outs[name] = OutputPort(
                     name=name, accepted_types=["text"]
                 )
 
-    async def fire(self, ctx) -> None:  # type: ignore[override]
+    async def fire(self, ctx) -> None:
         toks = self.ins["in"].consume()
         for tok in toks:
             value = tok.value.payload
             if not isinstance(value, str):
                 # Router currently only routes strings; pass through to default
-                self.outs[self._default].emit(  # type: ignore[attr-defined]
+                self.outs[self._default].emit(
                     TypedValue(type="text", payload=str(value))
                 )
                 continue
             routed = False
             for port_name, guard in self._guards.items():
                 if guard(value):
-                    self.outs[port_name].emit(  # type: ignore[attr-defined]
+                    self.outs[port_name].emit(
                         TypedValue(type="text", payload=value)
                     )
                     routed = True
                     break
             if not routed and self._default in self.outs:
-                self.outs[self._default].emit(  # type: ignore[attr-defined]
+                self.outs[self._default].emit(
                     TypedValue(type="text", payload=value)
                 )
 

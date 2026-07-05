@@ -281,9 +281,10 @@ class OpenAIProvider(LLMProvider):
                 "POST", "/responses", json=body,
             ) as resp:
                 if resp.status_code >= 400:
-                    body = await resp.aread()
+                    err_body = await resp.aread()
                     raise RuntimeError(
-                        f"OpenAI {resp.status_code}: {body.decode(errors='ignore')[:300]}"
+                        f"OpenAI {resp.status_code}: "
+                        f"{err_body.decode(errors='ignore')[:300]}"
                     )
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):

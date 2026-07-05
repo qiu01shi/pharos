@@ -69,7 +69,7 @@ class ToolEntity(Entity):
         props = params.get("properties") or {}
         return next(iter(props), "input")
 
-    async def fire(self, ctx) -> None:  # type: ignore[override]
+    async def fire(self, ctx) -> None:
         args: dict[str, Any] = {}
         arg_tokens = self.ins["args"].consume()
         if arg_tokens:
@@ -85,7 +85,7 @@ class ToolEntity(Entity):
         if not args and not arg_tokens:
             return
 
-        granted = getattr(ctx, "granted_permissions", set()) or set()
+        granted: set[str] = getattr(ctx, "granted_permissions", set()) or set()
         result = await self.registry.execute(
             self.tool_name, args, granted_permissions=granted
         )
