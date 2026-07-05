@@ -101,6 +101,7 @@ pharos/
 - ✅ **Permission RBAC** — each Entity declares `required_permissions`; `RunContext.granted_permissions` enforces at fire time
 - ✅ **Cross-process trace** — every span (event, attribute, duration) persisted to `~/.pharos/runs/<uuid>.json`
 - ✅ **TUI viewer** — `pharos trace --interactive <id>` shows span tree with color-coded durations
+- ✅ **OTLP export** — `pharos trace <id> --otlp out.json` emits OpenTelemetry OTLP/JSON for Jaeger / Tempo / any collector (`post_otlp()` for OTLP/HTTP)
 - ✅ **Replay** — `pharos replay --re-run --graph <yaml> <id>` reproduces a run with zero network calls
 - ✅ **`.env` loader** — auto-loads `~/.pharos/.env` (shell env wins, no `python-dotenv` dependency)
 - ✅ **Multi-port inputs** — `--input-extra port=value` seeds any number of `__in__.<port>` edges
