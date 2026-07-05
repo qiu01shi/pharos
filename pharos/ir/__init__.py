@@ -212,18 +212,18 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
         raise ValueError(f"node missing id/type: {node_raw}")
 
     if ntype in ("llm", "faux"):
-        spec = LLMNodeSpec.model_validate(node_raw)
-        provider_class = _resolve_provider_class(spec.provider)
+        llm_spec = LLMNodeSpec.model_validate(node_raw)
+        provider_class = _resolve_provider_class(llm_spec.provider)
 
         # Auto-build ToolRegistry from the `tools` preset
         tool_registry = None
-        if spec.tools == "coding":
+        if llm_spec.tools == "coding":
             from pharos.entities.tools import ToolRegistry
             from pharos.entities.tools_coding import register_coding_tools
 
             tool_registry = ToolRegistry()
             register_coding_tools(tool_registry)
-        elif spec.tools == "builtin":
+        elif llm_spec.tools == "builtin":
             from pharos.entities.tools import ToolRegistry
             from pharos.entities.tools_builtins import register_builtins
 
@@ -232,32 +232,32 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
 
         cfg = LLMEntityConfig(
             provider_class=provider_class,
-            provider_kwargs=dict(spec.params),
-            model_id=spec.model,
-            system_prompt=spec.system,
-            temperature=spec.temperature,
-            max_tokens=spec.max_tokens,
-            thinking_level=spec.thinking_level,  # type: ignore[arg-type]
+            provider_kwargs=dict(llm_spec.params),
+            model_id=llm_spec.model,
+            system_prompt=llm_spec.system,
+            temperature=llm_spec.temperature,
+            max_tokens=llm_spec.max_tokens,
+            thinking_level=llm_spec.thinking_level,
             tool_registry=tool_registry,
-            max_tool_iterations=spec.max_tool_iterations,
+            max_tool_iterations=llm_spec.max_tool_iterations,
         )
         return LLMAgent(node_id=nid, config=cfg)
 
     if ntype == "shell":
-        spec = ShellNodeSpec.model_validate(node_raw)
+        shell_spec = ShellNodeSpec.model_validate(node_raw)
         return ShellEntity(
             node_id=nid,
-            timeout=spec.timeout,
-            cwd=spec.cwd,
+            timeout=shell_spec.timeout,
+            cwd=shell_spec.cwd,
         )
 
     if ntype == "tool":
-        spec = ToolNodeSpec.model_validate(node_raw)
-        return _build_tool_entity(nid, spec)
+        tool_spec = ToolNodeSpec.model_validate(node_raw)
+        return _build_tool_entity(nid, tool_spec)
 
     if ntype == "python":
-        spec = PythonNodeSpec.model_validate(node_raw)
-        return _build_python_entity(nid, spec)
+        py_spec = PythonNodeSpec.model_validate(node_raw)
+        return _build_python_entity(nid, py_spec)
 
     raise ValueError(f"unknown node type: {ntype!r}")
 
@@ -315,9 +315,9 @@ def _build_python_entity(nid: str, spec: PythonNodeSpec) -> Entity:
     # Try the common signature: (node_id, **params). Fall back to
     # (node_id) and let setup() read from spec.params separately.
     try:
-        return cls(node_id=nid, **spec.params)  # type: ignore[call-arg,abstract]
+        return cls(node_id=nid, **spec.params)
     except TypeError:
-        return cls(node_id=nid)  # type: ignore[call-arg,abstract]
+        return cls(node_id=nid)
 
 
 def _add_subgraph_node(

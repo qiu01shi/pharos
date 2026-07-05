@@ -16,10 +16,8 @@ from rich.table import Table
 from pharos import __version__
 from pharos.core.graph import CompositeGraph
 from pharos.core.token import TypedValue
+from pharos.directors import make_director
 from pharos.directors.base import RunContext
-from pharos.directors.de import DEDirector
-from pharos.directors.fn import FNDirector
-from pharos.directors.sdf import SDFDirector
 from pharos.ir import load_graph, load_graph_from_text
 from pharos.observability.backend.console import ConsoleTraceBackend
 from pharos.observability.trace import InMemoryTracer
@@ -292,12 +290,9 @@ async def _run_with_trace(
         replayer=replayer,
     )
 
-    if director_name == "sdf":
-        d = SDFDirector(max_iterations=max_iters, convergence_k=converge_k)
-    elif director_name == "de":
-        d = DEDirector(max_iterations=max_iters)
-    else:
-        d = FNDirector()
+    d = make_director(
+        director_name, max_iters=max_iters, converge_k=converge_k
+    )
 
     result = await d.run(g, ctx)
     if backend is not None:
@@ -517,10 +512,10 @@ async def _replay_rerun(
             continue
         if not isinstance(node.instance, LLMAgent):
             continue
-        node.instance.provider = ReplayProvider(  # type: ignore[attr-defined]
+        node.instance.provider = ReplayProvider(
             node_id=node_id, cache=cache
         )
-        node.instance.model = replay_model  # type: ignore[attr-defined]
+        node.instance.model = replay_model
         node.instance._initialized = True  # type: ignore[attr-defined]
         swap_count += 1
 

@@ -78,7 +78,7 @@ class Memory(Entity):
         super().__init__(node_id=node_id)
         self._store = store if store is not None else _DEFAULT_STORE
 
-    async def fire(self, ctx) -> None:  # type: ignore[override]
+    async def fire(self, ctx) -> None:
         # Order: write → clear → read. This matches the "execute
         # side effects, then read" mental model and means a clear
         # performed in the same fire() can wipe a previous write.
@@ -109,17 +109,17 @@ class Memory(Entity):
             key = kt.value.payload
             v = self._store.get(key)
             if v is None:
-                self.outs["missing"].emit(  # type: ignore[attr-defined]
+                self.outs["missing"].emit(
                     TypedValue(type="text", payload=key)
                 )
             else:
                 payload = v if isinstance(v, str) else json.dumps(v)
-                self.outs["value"].emit(  # type: ignore[attr-defined]
+                self.outs["value"].emit(
                     TypedValue(type="text", payload=payload)
                 )
 
         # Always emit the current `stored` summary
-        self.outs["stored"].emit(  # type: ignore[attr-defined]
+        self.outs["stored"].emit(
             TypedValue(type="json", payload=dict(self._store.data))
         )
 

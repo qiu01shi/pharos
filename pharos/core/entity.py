@@ -18,7 +18,7 @@ from __future__ import annotations
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pharos.core.port import InputPort, OutputPort
 
@@ -51,22 +51,28 @@ class Entity(ABC):
     """
 
     spec: ClassVar[EntitySpec]
-    ins: ClassVar[dict[str, InputPort]]
-    outs: ClassVar[dict[str, OutputPort]]
-    required_permissions: ClassVar[set[str]] = set()
+    # Port *declarations* harvested by @entity live on the class; each
+    # instance gets its own cloned buffers in `ins` / `outs` below.
+    _declared_ins: ClassVar[dict[str, InputPort]] = {}
+    _declared_outs: ClassVar[dict[str, OutputPort]] = {}
+    # Per-instance ports (own buffers) and permission set. These are
+    # instance attributes so subclasses may set them dynamically in
+    # __init__ (e.g. Router, SubgraphEntity) without fighting mypy.
+    ins: dict[str, InputPort]
+    outs: dict[str, OutputPort]
+    required_permissions: set[str] = set()
     node_id: str
 
     def __init__(self, node_id: str | None = None) -> None:
         self.node_id = node_id or self.__class__.__name__
         # Per-instance port dicts (so multiple instances don't share buffers).
-        # mypy sees the class-level ClassVar; the dict comprehension is fine.
         self.ins = {
             name: _clone_port(port)
-            for name, port in type(self).ins.items()  # type: ignore[attr-defined]
+            for name, port in type(self)._declared_ins.items()
         }
         self.outs = {
             name: _clone_port(port)
-            for name, port in type(self).outs.items()  # type: ignore[attr-defined]
+            for name, port in type(self)._declared_outs.items()
         }
 
     @abstractmethod
@@ -87,11 +93,15 @@ class Entity(ABC):
         return None
 
 
-def _clone_port(port: InputPort | OutputPort) -> InputPort | OutputPort:
+_PortT = TypeVar("_PortT", InputPort, OutputPort)
+
+
+def _clone_port(port: _PortT) -> _PortT:
     """Make a per-instance copy of a class-level port declaration.
 
     Each entity instance needs its own buffer. The class-level port
     holds the schema (accepted_types, capacity) but not the buffer.
+    Generic over the two port kinds so callers keep the concrete type.
     """
     cls = type(port)
     return cls(
@@ -102,7 +112,7 @@ def _clone_port(port: InputPort | OutputPort) -> InputPort | OutputPort:
     )
 
 
-def entity(cls: type) -> type:
+def entity(cls: type[Entity]) -> type[Entity]:
     """Class decorator: collect declared ports, build EntitySpec.
 
     Two declaration styles are supported:
@@ -153,9 +163,9 @@ def entity(cls: type) -> type:
                 elif isinstance(port, OutputPort):
                     outputs[port_name] = port
 
-    cls.ins = inputs  # type: ignore[attr-defined]
-    cls.outs = outputs  # type: ignore[attr-defined]
-    cls.spec = EntitySpec(  # type: ignore[attr-defined]
+    cls._declared_ins = inputs
+    cls._declared_outs = outputs
+    cls.spec = EntitySpec(
         name=cls.__name__,
         inputs=tuple(inputs.keys()),
         outputs=tuple(outputs.keys()),

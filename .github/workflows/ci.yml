@@ -44,9 +44,6 @@ jobs:
         run: uv run ruff check pharos tests
 
       - name: Type check (mypy)
-        # Non-blocking for now: ~56 baseline errors are being burned down.
-        # Flip to a hard gate once the count reaches zero.
-        continue-on-error: true
         run: uv run mypy pharos
 
       - name: Test (pytest + coverage)

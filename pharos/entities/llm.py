@@ -44,7 +44,7 @@ class LLMEntityConfig:
     provider_kwargs: dict[str, Any]
     model_id: str
     system_prompt: str = ""
-    tools: list[Any] = None  # list[Tool] once provided
+    tools: list[Any] | None = None  # list[Tool] once provided
     temperature: float | None = None
     max_tokens: int | None = None
     thinking_level: str | None = None
@@ -105,7 +105,7 @@ class LLMAgent(Entity):
         self.total_tokens: int = 0
         self.total_cost: float = 0.0
 
-    async def setup(self, ctx) -> None:  # type: ignore[override]
+    async def setup(self, ctx) -> None:
         # Construct the provider (this may fail if API key is missing;
         # we let the error bubble — the Director will mark the run failed).
         self.provider = self.config.provider_class(
@@ -120,12 +120,12 @@ class LLMAgent(Entity):
         if self.model is None:
             self.model = models[0]
 
-    async def teardown(self) -> None:  # type: ignore[override]
+    async def teardown(self) -> None:
         if self.provider is not None:
             await self.provider.close()
             self.provider = None
 
-    async def fire(self, ctx) -> None:  # type: ignore[override]
+    async def fire(self, ctx) -> None:
         if self.provider is None or self.model is None:
             await self.setup(ctx)
         assert self.provider is not None
@@ -177,7 +177,7 @@ class LLMAgent(Entity):
 
         # Tool-call loop: keep calling LLM until it stops emitting
         # tool calls, or max_tool_iterations is hit.
-        granted = getattr(ctx, "granted_permissions", set()) or set()
+        granted: set[str] = getattr(ctx, "granted_permissions", set()) or set()
         for _iteration in range(self.config.max_tool_iterations + 1):
             context = Context(
                 system_prompt=system_prompt,

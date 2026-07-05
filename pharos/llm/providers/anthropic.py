@@ -51,17 +51,17 @@ def _convert_messages(context: Context) -> tuple[str | None, list[dict[str, Any]
                 messages.append({"role": "user", "content": content})
             else:
                 # List of TextContent / ImageContent
-                blocks = []
+                blocks: list[dict[str, Any]] = []
                 for block in content:
                     if isinstance(block, TextContent):
                         blocks.append({"type": "text", "text": block.text})
-                    elif isinstance(block, type(content[0])) and hasattr(block, "data"):
+                    elif hasattr(block, "data"):
                         blocks.append({
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": block.mime_type,  # type: ignore[union-attr]
-                                "data": block.data,  # type: ignore[union-attr]
+                                "media_type": block.mime_type,
+                                "data": block.data,
                             },
                         })
                 messages.append({"role": "user", "content": blocks})
@@ -88,9 +88,9 @@ def _convert_messages(context: Context) -> tuple[str | None, list[dict[str, Any]
             messages.append({"role": "assistant", "content": blocks})
         elif isinstance(m, ToolResultMessage):
             content_blocks = []
-            for b in m.content:
-                if isinstance(b, TextContent):
-                    content_blocks.append({"type": "text", "text": b.text})
+            for rb in m.content:
+                if isinstance(rb, TextContent):
+                    content_blocks.append({"type": "text", "text": rb.text})
             pending_tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": m.tool_call_id,

@@ -131,7 +131,7 @@ def check_permissions(entity: Any, run_ctx: RunContext) -> None:
     `PermissionPolicy` so entity-level and tool-level checks share one
     code path and one alias table.
     """
-    required = getattr(entity, "required_permissions", set()) or set()
+    required: set[str] = getattr(entity, "required_permissions", set()) or set()
     subject = f"entity {entity.node_id!r} ({type(entity).__name__})"
     run_ctx.policy().check(required, subject=subject)
 
@@ -176,12 +176,12 @@ async def safe_fire(
         check_permissions(entity, run_ctx)
         if not getattr(entity, "_initialized", False):
             await entity.setup(run_ctx)
-            entity._initialized = True  # type: ignore[attr-defined]
+            entity._initialized = True
 
     # Stable per-entity fire index so record/replay keys line up even when
     # a node fires many times (SDF/DE iterations).
     fire_index: int = getattr(entity, "_fire_count", 0)
-    entity._fire_count = fire_index + 1  # type: ignore[attr-defined]
+    entity._fire_count = fire_index + 1
 
     tracer = getattr(run_ctx, "tracer", None)
     fire_ctx.tracer = tracer
@@ -327,11 +327,11 @@ def topo_layers(graph: CompositeGraph) -> list[list[str]]:
     """
     # Work on a copy so we don't mutate the graph
     in_degree: dict[str, int] = {
-        n: graph._nx.in_degree(n)  # type: ignore[attr-defined]
-        for n in graph._nx.nodes  # type: ignore[attr-defined]
+        n: graph._nx.in_degree(n)
+        for n in graph._nx.nodes
     }
     successors: dict[str, list[str]] = {n: [] for n in in_degree}
-    for src, dst in graph._nx.edges:  # type: ignore[attr-defined]
+    for src, dst in graph._nx.edges:
         successors[src].append(dst)
 
     layers: list[list[str]] = []

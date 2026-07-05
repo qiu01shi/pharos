@@ -56,7 +56,7 @@ class ShellEntity(Entity):
         self.timeout = timeout
         self.cwd = cwd
 
-    async def fire(self, ctx) -> None:  # type: ignore[override]
+    async def fire(self, ctx) -> None:
         cmds = self.ins["command"].consume()
         if not cmds:
             return

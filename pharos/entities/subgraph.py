@@ -75,13 +75,11 @@ class SubgraphEntity(Entity):
         )
 
         # Build per-instance pass-through ports (empty accepted_types = any).
-        # Same instance-level port assignment Entity.__init__ performs; mypy
-        # flags the ClassVar reassignment as it does for the base class.
-        self.ins = {  # type: ignore[misc]
+        self.ins = {
             p: InputPort(name=p, accepted_types=[])
             for p in self._in_public_to_internal
         }
-        self.outs = {  # type: ignore[misc]
+        self.outs = {
             p: OutputPort(name=p, accepted_types=[])
             for p in self._out_public_to_internal
         }
@@ -95,7 +93,7 @@ class SubgraphEntity(Entity):
                     getattr(node.instance, "required_permissions", set())
                     or set()
                 )
-        self.required_permissions = required  # type: ignore[misc]
+        self.required_permissions = required
 
     async def fire(self, ctx) -> None:
         from pharos.directors import make_director

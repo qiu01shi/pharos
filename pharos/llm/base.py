@@ -72,8 +72,11 @@ async def acomplete_from_stream(
         # Critical: aclose() runs the generator's finally block, so
         # providers that record state (e.g. FauxProvider) get a chance
         # to finalize. Without this, `break` in async for skips the
-        # finally block (asyncio generator semantics).
-        await events.aclose()
+        # finally block (asyncio generator semantics). The protocol types
+        # this as a plain AsyncIterator, so guard for aclose().
+        aclose = getattr(events, "aclose", None)
+        if aclose is not None:
+            await aclose()
     if final is None:
         raise RuntimeError("stream ended without done event")
     return final

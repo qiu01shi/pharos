@@ -394,7 +394,8 @@ def get_run(run_id: str) -> list[dict[str, Any]] | None:
     if not p.exists():
         return None
     data = json.loads(p.read_text())
-    return data.get("spans", [])
+    spans: list[dict[str, Any]] = data.get("spans", [])
+    return spans
 
 
 def export_run_json(run_id: str, path: Path) -> None:
