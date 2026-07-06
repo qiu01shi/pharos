@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="812" viewBox="0 0 900 812" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .title  { font-weight: 700; font-size: 15px; }
+      .sub    { font-size: 12px; }
+      .step   { font-size: 13px; font-weight: 600; }
+      .band   { font-size: 12px; font-weight: 700; letter-spacing: .3px; }
+      .edge   { fill: #64748b; font-size: 11px; }
+      .conn   { stroke: #94a3b8; stroke-width: 2; fill: none; }
+      .flow   { stroke: #64748b; stroke-width: 2; fill: none; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="812" fill="#ffffff"/>
+
+  <!-- ============ SPEC ============ -->
+  <g>
+    <rect x="330" y="24" width="240" height="58" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.6"/>
+    <text x="450" y="49" text-anchor="middle" class="title" fill="#312e81">YAML spec</text>
+    <text x="450" y="68" text-anchor="middle" class="sub" fill="#4338ca">nodes + typed edges</text>
+  </g>
+
+  <path class="flow" d="M450,82 L450,116" marker-end="url(#arrow)"/>
+  <text x="462" y="103" class="edge">load_graph</text>
+
+  <g>
+    <rect x="330" y="118" width="240" height="58" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.6"/>
+    <text x="450" y="143" text-anchor="middle" class="title" fill="#312e81">CompositeGraph</text>
+    <text x="450" y="162" text-anchor="middle" class="sub" fill="#4338ca">typed ports</text>
+  </g>
+
+  <path class="flow" d="M450,176 L450,210" marker-end="url(#arrow)"/>
+
+  <!-- ============ DIRECTOR ============ -->
+  <g>
+    <rect x="330" y="212" width="240" height="58" rx="10" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.6"/>
+    <text x="450" y="237" text-anchor="middle" class="title" fill="#7c2d12">Director</text>
+    <text x="450" y="256" text-anchor="middle" class="sub" fill="#92400e">FN / SDF / DE</text>
+  </g>
+
+  <path class="flow" d="M450,270 L450,304" marker-end="url(#arrow)"/>
+
+  <!-- ============ SAFE_FIRE BAND ============ -->
+  <g>
+    <rect x="30" y="306" width="840" height="104" rx="12" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="5 4"/>
+    <text x="50" y="328" class="band" fill="#b45309">safe_fire - one shared path for every node</text>
+
+    <rect x="52" y="340" width="176" height="52" rx="9" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="140" y="371" text-anchor="middle" class="step" fill="#7c2d12">RBAC check</text>
+
+    <rect x="264" y="340" width="176" height="52" rx="9" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="352" y="371" text-anchor="middle" class="step" fill="#7c2d12">setup once</text>
+
+    <rect x="476" y="340" width="176" height="52" rx="9" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="564" y="371" text-anchor="middle" class="step" fill="#7c2d12">open trace span</text>
+
+    <rect x="688" y="340" width="160" height="52" rx="9" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="768" y="371" text-anchor="middle" class="step" fill="#7c2d12">entity.fire()</text>
+
+    <path class="conn" d="M228,366 L262,366" marker-end="url(#arrow)"/>
+    <path class="conn" d="M440,366 L474,366" marker-end="url(#arrow)"/>
+    <path class="conn" d="M652,366 L686,366" marker-end="url(#arrow)"/>
+  </g>
+
+  <path class="flow" d="M450,410 L450,444" marker-end="url(#arrow)"/>
+
+  <!-- ============ ENTITIES ============ -->
+  <g>
+    <rect x="300" y="446" width="300" height="60" rx="10" fill="#dcfce7" stroke="#22c55e" stroke-width="1.6"/>
+    <text x="450" y="471" text-anchor="middle" class="title" fill="#14532d">Entities</text>
+    <text x="450" y="491" text-anchor="middle" class="sub" fill="#166534">LLMAgent / Tool / Shell / Subgraph / Retry</text>
+  </g>
+
+  <path class="flow" d="M450,506 L450,540" marker-end="url(#arrow)"/>
+
+  <!-- ============ TOKENS ============ -->
+  <g>
+    <rect x="315" y="542" width="270" height="58" rx="10" fill="#fae8ff" stroke="#d946ef" stroke-width="1.6"/>
+    <text x="450" y="567" text-anchor="middle" class="title" fill="#701a75">Tokens + Spans</text>
+    <text x="450" y="586" text-anchor="middle" class="sub" fill="#86198f">hash-chained lineage</text>
+  </g>
+
+  <path class="flow" d="M450,600 L450,632" marker-end="url(#arrow)"/>
+
+  <!-- ============ RUN RECORD (cylinder) ============ -->
+  <g>
+    <path d="M356,644 a94,11 0 0,0 188,0 v40 a94,11 0 0,1 -188,0 z" fill="#fae8ff" stroke="#d946ef" stroke-width="1.6"/>
+    <ellipse cx="450" cy="644" rx="94" ry="11" fill="#f5d0fe" stroke="#d946ef" stroke-width="1.6"/>
+    <text x="450" y="668" text-anchor="middle" class="title" fill="#701a75" font-size="14">Run record</text>
+    <text x="450" y="685" text-anchor="middle" class="sub" fill="#86198f" font-size="11">~/.pharos/runs/</text>
+  </g>
+
+  <path class="flow" d="M450,695 L450,724" marker-end="url(#arrow)"/>
+
+  <!-- ============ INSPECT BAND ============ -->
+  <g>
+    <rect x="30" y="726" width="840" height="72" rx="12" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.4" stroke-dasharray="5 4"/>
+
+    <rect x="50" y="742" width="188" height="42" rx="9" fill="#ffffff" stroke="#06b6d4" stroke-width="1.5"/>
+    <text x="144" y="760" text-anchor="middle" class="sub" fill="#0e7490" font-weight="600">replay --re-run</text>
+    <text x="144" y="775" text-anchor="middle" fill="#0891b2" font-size="10">zero network</text>
+
+    <rect x="256" y="742" width="188" height="42" rx="9" fill="#ffffff" stroke="#06b6d4" stroke-width="1.5"/>
+    <text x="350" y="760" text-anchor="middle" class="sub" fill="#0e7490" font-weight="600">trace -i</text>
+    <text x="350" y="775" text-anchor="middle" fill="#0891b2" font-size="10">TUI tree</text>
+
+    <rect x="462" y="742" width="188" height="42" rx="9" fill="#ffffff" stroke="#06b6d4" stroke-width="1.5"/>
+    <text x="556" y="760" text-anchor="middle" class="sub" fill="#0e7490" font-weight="600">trace --otlp</text>
+    <text x="556" y="775" text-anchor="middle" fill="#0891b2" font-size="10">Jaeger / Tempo</text>
+
+    <rect x="668" y="742" width="182" height="42" rx="9" fill="#ffffff" stroke="#06b6d4" stroke-width="1.5"/>
+    <text x="759" y="760" text-anchor="middle" class="sub" fill="#0e7490" font-weight="600">test / diff</text>
+    <text x="759" y="775" text-anchor="middle" fill="#0891b2" font-size="10">gate + drift</text>
+  </g>
+</svg>
