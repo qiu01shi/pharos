@@ -1,13 +1,16 @@
 # pharos
 
-> **Typed dataflow runtime for LLM workflows — with first-class trace, replay, and permissions.**
+> **Typed dataflow runtime for LLM workflows** — with first-class **trace**, **replay**, **permissions**, and **Agent CI**.
 
-pharos turns a multi-step LLM workflow into a **typed dataflow graph**: nodes are LLM calls / shell commands / Python code, edges are typed ports, and a **Director** drives the firing cycle. Every fire is wrapped in a span, every token is content-hashed into a lineage chain, and runs are **recorded and replayed** with zero network calls — so a run becomes a regression artifact you can **test** and **diff** like code.
+pharos compiles a multi-step LLM workflow into a **typed dataflow graph**: nodes are LLM calls, shell commands, or Python; edges are typed ports; a **Director** drives the firing cycle. Every fire runs through *one shared path* that checks **permissions**, opens a **trace span**, and content-hashes each output token into a **lineage chain**. Runs are **recorded and replayed with zero network calls** — so a run becomes a regression artifact you can **`test`** and **`diff`** like source code.
 
-Built to answer two real pain points:
+### Three pain points, three answers
 
-- **Multi-step LLM workflows are untraceable.** A bug-fix pipeline that runs "analyze → patch → test → review" gives you no way to see which step spent the tokens or which one hung.
-- **Tool-using agents are ungovernable.** A coding agent with shell access can `rm -rf /` while you sleep. pharos makes tool permissions a first-class deployment decision.
+| Pain point | How pharos answers it |
+| --- | --- |
+| **Untraceable** — which step spent the tokens? which one hung? | Every fire is a hash-chained **trace span** — walk it in a TUI, or export **OTLP** to Jaeger / Tempo. |
+| **Ungovernable** — a shell-enabled agent can `rm -rf /` while you sleep. | Every entity and tool declares `required_permissions`; **RBAC** is enforced at fire time. |
+| **Unreviewable** — no unit tests, no `git diff`; can't tell an improvement from a regression. | **`pharos test`** gates a golden run offline (per-commit, zero cost); **`pharos diff`** shows exactly what changed, node by node. |
 
 ---
 
@@ -15,38 +18,9 @@ Built to answer two real pain points:
 
 From a YAML graph to a replayable, traced run:
 
-```mermaid
-flowchart TD
-  yamlSpec["YAML spec<br/>nodes + edges"] -->|load_graph| composite["CompositeGraph<br/>typed ports"]
-  composite --> director["Director<br/>FN / SDF / DE"]
-
-  subgraph safeFire ["safe_fire per node"]
-    direction TB
-    rbac["PermissionPolicy<br/>RBAC check"]
-    setupOnce["setup()<br/>once"]
-    traceSpan["Trace span"]
-    doFire["entity.fire()"]
-    rbac --> setupOnce --> traceSpan --> doFire
-  end
-  director --> rbac
-
-  doFire --> llm["LLMAgent<br/>provider + tools"]
-  doFire --> toolN["ToolEntity"]
-  doFire --> shellN["ShellEntity"]
-  doFire --> subN["SubgraphEntity<br/>nested graph"]
-  doFire --> retryN["RetryEntity<br/>backoff retry"]
-
-  llm --> outTokens["Tokens + Spans<br/>hash-chained"]
-  toolN --> outTokens
-  shellN --> outTokens
-  subN --> outTokens
-  retryN --> outTokens
-
-  outTokens -->|persist| runStore["Run record<br/>~/.pharos/runs/"]
-  runStore --> replayCmd["replay<br/>--re-run"]
-  runStore --> tuiCmd["trace -i<br/>TUI tree"]
-  runStore --> otlpCmd["trace --otlp<br/>OTLP JSON"]
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="pharos architecture: YAML spec compiles to a typed CompositeGraph, a Director drives every node through one shared safe_fire path (RBAC, setup, trace span, fire), entities emit hash-chained tokens into a run record, which powers replay, the trace TUI, OTLP export, and Agent CI (test / diff)." width="760">
+</p>
 
 Every node fires through one shared `safe_fire` path, so RBAC, tracing, and
 record/replay apply uniformly regardless of the Director:
