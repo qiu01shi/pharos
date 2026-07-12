@@ -1,14 +1,14 @@
 # pharos
 
-> **LLM agents as typed dataflow graphs** — every run is traced, replayed offline, permission-gated, and **testable like code**.
+> **LLM agents as typed dataflow graphs** — every run is traced, replayed offline, capability-gated, and **testable like code**.
 
-Most agent frameworks give you a prompt chain. pharos gives you a **compiler + runtime**: a YAML graph compiles to typed ports, a **Director** schedules every node, and each fire goes through one shared `safe_fire` path (RBAC → trace span → hash-chained token). The full run is persisted — so you can **replay it without network**, gate it in CI with **`pharos test`**, and **`pharos diff`** exactly what changed between two runs.
+Most agent frameworks give you a prompt chain. pharos gives you a **compiler + runtime**: YAML, Python builders, team templates, and Studio all compile to one versioned graph IR; a **Director** schedules every node, and each fire goes through one shared `safe_fire` path (capability check → trace span → hash-chained token). The full run is persisted — so you can **replay output boundaries without network**, gate them in CI with **`pharos test`**, and **`pharos diff`** exactly what changed between two runs.
 
 | | LangChain-style chains | pharos |
 | --- | --- | --- |
 | **Structure** | Sequential prompts / ad-hoc loops | **Typed ports** + Directors (FN / SDF / DE) |
 | **Observability** | Log scraping | **Hash-chained spans** → TUI or OTLP |
-| **Safety** | Hope the agent behaves | **RBAC** enforced at every fire |
+| **Authorization** | Ad-hoc tool checks | **Capabilities** enforced at every fire |
 | **Regression** | Manual re-run, eyeball the output | **`pharos test`** offline gate + **`pharos diff`** |
 
 <p align="center">
@@ -28,13 +28,19 @@ nodes:
   - id: triage
     type: llm
     provider: minimax
-    output_schema: { file: str, line: int, severity: str }   # validated on the json port
-    max_repair_attempts: 2                                    # self-heal before failing
+    output_schema:
+      type: object
+      properties:
+        file: { type: string }
+        line: { type: integer }
+        severity: { type: string }
+      required: [file, line, severity]
+    max_repair_attempts: 2                                  # self-heal before failing
 ```
 
-### 2. One `safe_fire` path — RBAC + trace on every node
+### 2. One `safe_fire` path — capabilities + trace on every node
 
-Whatever the Director (FN / SDF / DE) and whatever the entity (LLM / shell / tool / subgraph), **every** fire flows through the same guarded path. RBAC, tracing, cost accounting, and record/replay apply uniformly — there's no way for a node to skip the permission check.
+Whatever the Director (FN / SDF / DE) and whatever the entity (LLM / shell / tool / subgraph), **every** fire flows through the same guarded path. Capability authorization, tracing, cost accounting, and record/replay apply uniformly — there's no way for a node to skip the permission check.
 
 ```mermaid
 sequenceDiagram
@@ -56,11 +62,11 @@ sequenceDiagram
   SF-->>D: tokens + cost
 ```
 
-A shell-enabled coding agent can't `rm -rf /` unless you granted `bash:execute` — permissions are a deploy-time decision, enforced at fire time.
+A shell-enabled coding agent is denied unless you grant `bash:execute`. This is capability authorization, **not a sandbox**: once shell access is granted, run untrusted agents inside a container or another OS-level isolation boundary.
 
 ### 3. Hash-chained tokens — trace, replay, zero network
 
-Every output `Token` is frozen and content-hashed into a lineage chain (`prev_hash` + `self_hash`). Two runs of the same graph + input should produce the same head hash; if not, something drifted and you'll know. Because every entity's outputs are captured (LLM **and** shell / python / tool / subgraph), a recorded run **replays byte-for-byte offline** — and exports to **OTLP** for Jaeger / Tempo, or a TUI span tree.
+Every output `Token` is frozen and content-hashed into a lineage chain (`prev_hash` + `self_hash`). Two runs of the same deterministic graph + input should produce the same content hashes; if not, something drifted. Because every entity's output payloads are captured (LLM **and** shell / python / tool / subgraph), a recorded run can replay those output boundaries offline without re-executing side effects. Trace timing and other runtime metadata are not claimed to be byte-identical.
 
 ```bash
 uv run pharos trace --interactive <run_id>                 # span tree, color-coded durations
@@ -141,14 +147,63 @@ Full install + `.env` setup: [docs/quickstart.md](docs/quickstart.md).
 ## Also built in
 
 - **6 providers** + ReplayProvider — OpenAI, Anthropic, DeepSeek, GLM, MiniMax, Faux
-- **9 entities** — LLM, Shell, Router, Memory, Human (HITL, pause/resume), Tool, Subgraph, Retry + custom Python
-- **7 coding tools** — bash, read, write, edit (anchor-validated), delete, glob, grep — each RBAC-gated
+- **11 entities** — LLM, Shell, Router, Memory, Human, Tool, Subgraph, Retry, Remote, Container + custom Python
+- **7 coding tools** — bash, read, write, edit (anchor-validated), delete, glob, grep — each capability-gated
 - **3 Directors** — FN (topological), SDF (feedback, K-of-N convergence), DE (event-driven)
 - **Composability** — embed a whole graph as one `type: subgraph` node (nested Directors, `ref` + `ref_sha` pin, cycle detection)
 - **Resilience & governance** — `retry:` backoff, run-level budgets (`--max-cost` / `--max-tokens`), `pharos resume` for partial runs
 - **SQLite trace index** — `pharos trace query --entity/--since/--min-cost` across sessions
 
-**Deliberately not:** web UI, multi-machine distributed execution, IDE plugin, vision `read`. Rationale in [docs/architecture.md](docs/architecture.md).
+## Authoring: one IR, four views
+
+YAML is no longer the only way to create a team. `GraphBuilder` and
+`TeamSpec` are code-first authoring layers; Studio is the local visual and trace
+workbench. All of them lower to `pharos.ai/v1`, then pass through the same
+validation and compiler path.
+
+```python
+from pharos.ir import GraphBuilder, TeamMemberSpec, TeamSpec
+
+team = TeamSpec(
+    name="review-loop",
+    pattern="reflection",
+    members=[
+        TeamMemberSpec(id="writer", provider="openai", model="gpt-4.1"),
+        TeamMemberSpec(id="reviewer", provider="anthropic", model="claude-sonnet-4-5"),
+    ],
+)
+graph = team.build()
+
+# Or construct arbitrary graphs with GraphBuilder and export reviewable YAML.
+builder = GraphBuilder("pipeline")
+draft = builder.llm("draft", provider="openai", model="gpt-4.1")
+builder.connect(builder.input.output("prompt"), draft.input("prompt"))
+builder.connect(draft.output("text"), builder.output.input("response"))
+print(builder.to_yaml())
+```
+
+Run Studio locally with Node.js 22+:
+
+```bash
+cd studio && npm install && npm run dev
+# Export a trace, then load both files in Studio:
+uv run pharos trace <run_id> --export run.json
+```
+
+See [Studio](docs/studio.md) and [the versioned worker protocol](docs/worker-protocol.md).
+
+## Heterogeneous execution boundary
+
+`type: remote` sends a fire to any HTTP service implementing
+`pharos.worker/v1`; `type: container` runs the same request/response protocol in
+an OCI image. Container images are digest-pinned and network-disabled by
+default. This is an interoperability boundary, not a distributed control plane:
+the local Director still owns scheduling, budgets, traces, retries, and graph
+state.
+
+**Deliberately not:** a durable multi-machine control plane, IDE plugin, vision
+`read`, or arbitrary remote code trust. Rationale in
+[docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -160,14 +215,16 @@ Full install + `.env` setup: [docs/quickstart.md](docs/quickstart.md).
 | [architecture.md](docs/architecture.md) | Design rationale, `safe_fire`, token hash chain, layer contracts |
 | [cookbook.md](docs/cookbook.md) | Multi-reviewer, SDF feedback, coding agent, subgraphs |
 | [ARCH-COMPOSABILITY.md](docs/ARCH-COMPOSABILITY.md) | Tool nodes, subgraph embedding, unified RBAC |
+| [studio.md](docs/studio.md) | Visual graph inspection and trace-overlay workflow |
+| [worker-protocol.md](docs/worker-protocol.md) | Remote/container interoperability contract |
 
 ---
 
 ## Status
 
-**v0.2.0** · 430 tests · ruff + mypy clean · coverage gate 78% · P95 ≈ 10 ms (100 concurrent actors)
+**v0.3.0** · ruff + mypy clean · coverage gate 78% · P95 ≈ 14 ms (100 concurrent actors)
 
-**Near-term:** real-API tool-calling integration tests, Anthropic native structured output. **Later:** vision `read`, more Directors (PN / CT), full SDF checkpoint.
+**Near-term:** editable Studio graphs, schema-driven forms, and worker conformance tests. **Later:** durable scheduling only after remote-worker demand and failure semantics are proven.
 
 ---
 

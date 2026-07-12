@@ -29,10 +29,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from pharos.core.entity import Entity
 from pharos.core.graph import CompositeGraph
+from pharos.core.schema import check_schema
 from pharos.entities.llm import LLMAgent, LLMEntityConfig
 from pharos.entities.shell import ShellEntity
 from pharos.llm.providers.faux import FauxConfig, FauxProvider  # noqa: F401
@@ -40,6 +41,7 @@ from pharos.llm.providers.glm import GLMProvider
 from pharos.llm.providers.openai import OpenAIProvider
 
 DirectorName = Literal["fn", "sdf", "de"]  # PN/CT added in later phases
+IR_VERSION = "pharos.ai/v1"
 
 
 # ---------- node specs ----------
@@ -77,6 +79,15 @@ class LLMNodeSpec(BaseModel):
     max_repair_attempts: int = 0
     params: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("output_schema")
+    @classmethod
+    def _valid_output_schema(
+        cls, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if value is not None:
+            check_schema(value, require_constraints=True)
+        return value
+
 
 class ShellNodeSpec(BaseModel):
     """Configuration for a `type: shell` node."""
@@ -102,6 +113,29 @@ class ToolNodeSpec(BaseModel):
     tool: str
     preset: Literal["coding", "builtin"] = "coding"
     arg_key: str | None = None
+
+
+class RemoteNodeSpec(BaseModel):
+    """Language-neutral HTTP worker node."""
+
+    id: str
+    type: Literal["remote"] = "remote"
+    endpoint: str
+    timeout: float = 120.0
+    headers_env: dict[str, str] = Field(default_factory=dict)
+
+
+class ContainerNodeSpec(BaseModel):
+    """OCI worker node using the same protocol as RemoteEntity."""
+
+    id: str
+    type: Literal["container"] = "container"
+    image: str
+    command: list[str] = Field(default_factory=list)
+    timeout: float = 300.0
+    network: bool = False
+    allow_unpinned: bool = False
+    runtime: str = "docker"
 
 
 class SubgraphNodeSpec(BaseModel):
@@ -211,12 +245,34 @@ class BudgetSpec(BaseModel):
     mode: Literal["hard", "soft"] = "hard"
 
 
+class ExecutionSpec(BaseModel):
+    """Director-independent run limits stored with the graph."""
+
+    max_iterations: int = Field(default=20, ge=1)
+    convergence_k: int = Field(default=2, ge=1)
+
+
 class GraphSpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    api_version: str = Field(default=IR_VERSION, alias="apiVersion")
+    kind: Literal["Graph"] = "Graph"
+    metadata: dict[str, Any] = Field(default_factory=dict)
     name: str = "graph"
     director: DirectorName = "fn"
     nodes: list[dict[str, Any]]
     edges: list[EdgeSpec] = Field(default_factory=list)
     budget: BudgetSpec | None = None
+    execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
+
+    @field_validator("api_version")
+    @classmethod
+    def _supported_version(cls, value: str) -> str:
+        if value != IR_VERSION:
+            raise ValueError(
+                f"unsupported IR apiVersion {value!r}; expected {IR_VERSION!r}"
+            )
+        return value
 
     @field_validator("nodes")
     @classmethod
@@ -315,6 +371,31 @@ def _build_entity(node_raw: dict[str, Any]) -> Entity:
     if ntype == "tool":
         tool_spec = ToolNodeSpec.model_validate(node_raw)
         return _build_tool_entity(nid, tool_spec)
+
+    if ntype == "remote":
+        from pharos.entities.remote import RemoteEntity
+
+        remote_spec = RemoteNodeSpec.model_validate(node_raw)
+        return RemoteEntity(
+            node_id=nid,
+            endpoint=remote_spec.endpoint,
+            timeout=remote_spec.timeout,
+            headers_env=remote_spec.headers_env,
+        )
+
+    if ntype == "container":
+        from pharos.entities.container import ContainerEntity
+
+        container_spec = ContainerNodeSpec.model_validate(node_raw)
+        return ContainerEntity(
+            node_id=nid,
+            image=container_spec.image,
+            command=container_spec.command,
+            timeout=container_spec.timeout,
+            network=container_spec.network,
+            allow_unpinned=container_spec.allow_unpinned,
+            runtime=container_spec.runtime,
+        )
 
     if ntype == "human":
         from pharos.entities.human import HumanEntity
@@ -533,16 +614,31 @@ def load_graph(
     )
 
 
+# Public authoring APIs import after the loader definitions to avoid circular
+# initialization while builder.py compiles back through load_graph_from_dict.
+from pharos.ir.builder import GraphBuilder, NodeRef, PortRef  # noqa: E402
+from pharos.ir.team import TeamMemberSpec, TeamSpec, TerminationSpec  # noqa: E402
+
 __all__ = [
+    "IR_VERSION",
     "BudgetSpec",
+    "ContainerNodeSpec",
     "EdgeSpec",
+    "ExecutionSpec",
+    "GraphBuilder",
     "GraphSpec",
     "HumanNodeSpec",
     "LLMNodeSpec",
+    "NodeRef",
+    "PortRef",
     "PythonNodeSpec",
+    "RemoteNodeSpec",
     "RetrySpec",
     "ShellNodeSpec",
     "SubgraphNodeSpec",
+    "TeamMemberSpec",
+    "TeamSpec",
+    "TerminationSpec",
     "ToolNodeSpec",
     "load_graph",
     "load_graph_from_dict",

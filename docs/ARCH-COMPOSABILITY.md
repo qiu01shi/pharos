@@ -129,7 +129,7 @@ idempotent operations (LLM calls, reads) or where a duplicate is acceptable.
 
 Previously only LLM provider calls were replayable. The replay boundary now sits
 at every entity's **output** layer, so shell / python / tool / subgraph nodes
-reproduce byte-for-byte too.
+reproduce recorded output payloads without re-executing those side effects.
 
 - `RunRecorder` (`pharos/runtime/__init__.py`) captures each entity's emitted
   output tokens, keyed `"{prefix}{node_id}:{fire_index}"`. `RunReplayer`

@@ -20,6 +20,7 @@ import networkx as nx
 
 from pharos.core.entity import Entity
 from pharos.core.relation import Edge
+from pharos.core.schema import compatibility_errors
 
 
 class NodeKind(StrEnum):
@@ -71,6 +72,9 @@ class CompositeGraph:
         self._add_io_nodes()
         # Exports: public_name -> (internal_node, internal_port)
         self.exports: dict[str, tuple[str, str]] = {}
+        # Runtime output collection.  Declaring it here makes the lifecycle
+        # explicit and lets reset_run_state() reliably prepare graph reuse.
+        self.collected: dict[str, dict[str, list[Any]]] = {}
 
     # ---------- node management ----------
 
@@ -150,6 +154,7 @@ class CompositeGraph:
         self._check_node(dst_node, "dst")
         self._check_port(self.nodes[src_node], src_port, "src")
         self._check_port(self.nodes[dst_node], dst_port, "dst")
+        self._check_contract(src_node, src_port, dst_node, dst_port)
         edge = Edge(
             src_node=src_node, src_port=src_port,
             dst_node=dst_node, dst_port=dst_port,
@@ -175,6 +180,32 @@ class CompositeGraph:
                 raise ValueError(
                     f"{role} port {port_name!r} not declared on "
                     f"entity {node.id!r} ({sorted(ports)})"
+                )
+
+    def _check_contract(
+        self, src_node: str, src_port: str, dst_node: str, dst_port: str
+    ) -> None:
+        """Reject port contracts that are provably incompatible."""
+        source = self.nodes[src_node].instance
+        target = self.nodes[dst_node].instance
+        if source is None or target is None:
+            return
+        source_port = source.outs[src_port]
+        target_port = target.ins[dst_port]
+        source_types = set(source_port.accepted_types)
+        target_types = set(target_port.accepted_types)
+        if source_types and target_types and source_types.isdisjoint(target_types):
+            raise ValueError(
+                f"type contract mismatch: {src_node}.{src_port} emits "
+                f"{sorted(source_types)} but {dst_node}.{dst_port} accepts "
+                f"{sorted(target_types)}"
+            )
+        if source_port.schema is not None and target_port.schema is not None:
+            errors = compatibility_errors(source_port.schema, target_port.schema)
+            if errors:
+                raise ValueError(
+                    f"schema contract mismatch: {src_node}.{src_port} -> "
+                    f"{dst_node}.{dst_port}: {'; '.join(errors)}"
                 )
 
     # ---------- graph analysis ----------
@@ -213,6 +244,19 @@ class CompositeGraph:
         if node_id not in self.nodes:
             raise KeyError(f"node {node_id!r} not in graph {self.name!r}")
         return self.nodes[node_id]
+
+    def reset_run_state(self) -> None:
+        """Prepare this graph instance for a new, independent run.
+
+        Call this *before* seeding the next run's inputs.  Graph topology and
+        entity configuration are preserved; port buffers, collected outputs,
+        Director bookkeeping, and entity-specific transient counters are
+        cleared.  SubgraphEntity propagates the reset into its child graph.
+        """
+        self.collected.clear()
+        for node in self.nodes.values():
+            if node.instance is not None:
+                node.instance.reset_run_state()
 
     def validate(self) -> list[str]:
         """Static checks. Returns a list of error messages (empty if valid)."""

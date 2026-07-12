@@ -11,16 +11,9 @@ A recorded run's ``outputs`` map (from ``RunRecorder.to_dict()`` /
         ...
     }
 
-``chain_digest`` reduces that whole structure to a single sha256 hex
-string over the *content* of every emitted token (node/fire, port, type,
-canonical payload). Because Phase 0 made ``Token`` hashing exclude
-wall-clock time, the same graph + same input reproduces the same digest.
-A changed digest therefore means the runtime path or graph structure
-produced different data — the offline regression signal in ``pharos test``.
-
-The digest is deliberately payload-based (not the stored ``self_hash``) so
-it is robust to lineage-stamping details evolving over time and depends
-only on what each node actually output.
+Version 2 fingerprints ordered output-boundary records, including lineage.
+Version 1 remains available for existing fixtures and is payload-only and
+order-independent.
 """
 
 from __future__ import annotations
@@ -45,30 +38,56 @@ def canonical_payload(payload: Any) -> Any:
     return _canonical(payload)
 
 
-def _record_line(key: str, rec: dict[str, Any]) -> str:
+def _record_line(key: str, index: int, rec: dict[str, Any], version: int) -> str:
     """Canonical one-line representation of a single emitted-token record."""
     entry = {
         "key": key,
+        "index": index,
         "port": rec.get("port"),
         "type": rec.get("type"),
         "payload": _canonical(rec.get("payload")),
     }
+    if version >= 2:
+        entry.update(
+            {
+                "origin": rec.get("origin"),
+                "prev_hash": rec.get("prev_hash"),
+                "self_hash": rec.get("self_hash"),
+            }
+        )
     return json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def chain_digest(outputs: Outputs) -> str:
+def chain_digest(outputs: Outputs, *, version: int = 2) -> str:
     """Return a stable sha256 hex fingerprint of a run's outputs.
 
-    Order-independent: records are canonicalized and sorted, so neither the
-    iteration order of nodes nor of ports within a node affects the result.
-    An empty run digests to the sha256 of the empty string.
+    Mapping key order is irrelevant.  Version 2 preserves record order within
+    each node fire and includes lineage.  Version 1 sorts records for backward
+    compatibility with fixtures recorded by pharos <= 0.2.
     """
     lines = [
-        _record_line(key, rec)
+        _record_line(key, index, rec, version)
         for key in sorted(outputs)
-        for rec in outputs[key]
+        for index, rec in enumerate(outputs[key])
     ]
-    lines.sort()
+    if version <= 1:
+        # Recreate the old representation exactly: it had no index/lineage.
+        lines = [
+            json.dumps(
+                {
+                    "key": key,
+                    "payload": _canonical(rec.get("payload")),
+                    "port": rec.get("port"),
+                    "type": rec.get("type"),
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            )
+            for key in sorted(outputs)
+            for rec in outputs[key]
+        ]
+        lines.sort()
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 

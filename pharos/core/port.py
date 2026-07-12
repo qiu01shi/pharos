@@ -104,6 +104,19 @@ class _PortBase:
             out = [self.buffer.popleft() for _ in range(min(n, len(self.buffer)))]
         return out
 
+    def reset(self) -> None:
+        """Clear buffered data and per-run counters.
+
+        Ports are configuration objects plus mutable run state.  A graph that
+        is intentionally reused for another independent run must discard both
+        the old tokens and the old counters; keeping either makes inspection
+        and capacity accounting span multiple runs unexpectedly.
+        """
+        self.buffer.clear()
+        self.total_received = 0
+        self.total_emitted = 0
+        self.total_dropped = 0
+
     def peek(self) -> Token | None:
         """Return the head token without removing it."""
         return self.buffer[0] if self.buffer else None

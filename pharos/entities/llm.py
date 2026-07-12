@@ -157,6 +157,12 @@ class LLMAgent(Entity):
             await self.provider.close()
             self.provider = None
 
+    def reset_run_state(self) -> None:
+        super().reset_run_state()
+        self.total_tokens = 0
+        self.total_cost = 0.0
+        self.repair_attempts_used = 0
+
     async def fire(self, ctx) -> None:
         if self.provider is None or self.model is None:
             await self.setup(ctx)

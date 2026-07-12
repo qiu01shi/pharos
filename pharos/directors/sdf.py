@@ -2,9 +2,8 @@
 
 Behavior:
 - Runs the graph in rounds (iterations).
-- After each round, compare the head token of every output port to
-  the previous round's head token (via `self_hash`).
-- A node is "stable" if its head hash didn't change. The run
+- After each round, fingerprint exactly the tokens emitted by each fire.
+- A node is "stable" if its per-fire output digest didn't change. The run
   converges when ALL nodes have been stable for K consecutive
   rounds (K-of-N strategy).
 - Hard cap on `max_iterations` to prevent runaway.
@@ -35,7 +34,7 @@ class SDFDirector:
 
     Args:
         max_iterations: Hard cap on rounds (default 20).
-        convergence_k: Number of consecutive stable rounds before
+        convergence_k: Number of consecutive stable fire outputs before
             the run is considered converged (default 2).
     """
 
@@ -51,10 +50,9 @@ class SDFDirector:
     ) -> RunResult:
         self._edge_index = build_edge_index(graph)
 
-        # Per (node, port) head hash from the previous round
-        prev_hashes: dict[tuple[str, str], str] = {}
-        # Per (node, port) how many consecutive rounds it has been stable
-        stable_count: dict[tuple[str, str], int] = defaultdict(int)
+        # Per-node fingerprint of exactly what its most recent fire emitted.
+        prev_digests: dict[str, str] = {}
+        stable_count: dict[str, int] = defaultdict(int)
 
         total_tokens = 0
         total_cost = 0.0
@@ -76,19 +74,22 @@ class SDFDirector:
                         if n.instance is not None
                     )
                 )
-                fire_ctx = FireContext(
-                    run_id=ctx.run_id,
-                    step_id=f"{ctx.run_id}:{step_counter + 1}",
-                    iter=it,
-                    granted_permissions=getattr(
-                        ctx, "granted_permissions", set()
-                    ),
-                )
                 tasks = [
                     asyncio.create_task(
-                        safe_fire(graph.node(nid).instance, fire_ctx, ctx)
+                        safe_fire(
+                            graph.node(nid).instance,
+                            FireContext(
+                                run_id=ctx.run_id,
+                                step_id=f"{ctx.run_id}:{step_counter + index + 1}",
+                                iter=it,
+                                granted_permissions=getattr(
+                                    ctx, "granted_permissions", set()
+                                ),
+                            ),
+                            ctx,
+                        )
                     )
-                    for nid in all_nodes
+                    for index, nid in enumerate(all_nodes)
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in results:
@@ -104,31 +105,28 @@ class SDFDirector:
                         total_tokens += r[0]
                         total_cost += r[1]
 
+                # Snapshot per-fire digests BEFORE delivery.  safe_fire stores
+                # them independently from the mutable output buffers, so this
+                # remains correct for connected and unconnected ports alike.
+                current_digests = {
+                    nid: str(
+                        getattr(
+                            graph.node(nid).instance,
+                            "_last_emission_digest",
+                            "",
+                        )
+                    )
+                    for nid in all_nodes
+                }
+
                 await deliver_upstream(graph, self._edge_index)
 
-                # AFTER fire+deliver: snapshot head hashes and compare
-                current_hashes: dict[tuple[str, str], str] = {}
-                for node_id, node in graph.nodes.items():
-                    if node.instance is None:
-                        continue
-                    for port_name, port in node.instance.outs.items():
-                        head = port.peek()
-                        if head is not None:
-                            current_hashes[(node_id, port_name)] = head.self_hash
-
-                # Compare new head hashes to previous
                 all_stable = True
-                for key, new_hash in current_hashes.items():
-                    old_hash = prev_hashes.get(key)
-                    if new_hash == old_hash:
-                        stable_count[key] += 1
+                for node_id, new_digest in current_digests.items():
+                    if new_digest == prev_digests.get(node_id):
+                        stable_count[node_id] += 1
                     else:
-                        stable_count[key] = 0
-                        all_stable = False
-                # If a key vanished, reset its count
-                for key in prev_hashes:
-                    if key not in current_hashes:
-                        stable_count[key] = 0
+                        stable_count[node_id] = 0
                         all_stable = False
 
                 if all_stable and stable_count and all(
@@ -136,7 +134,7 @@ class SDFDirector:
                 ):
                     converged = True
                     break
-                prev_hashes = current_hashes
+                prev_digests = current_digests
 
             return RunResult(
                 converged=converged,

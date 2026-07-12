@@ -57,6 +57,49 @@ class _Reviewer(Entity):
 
 
 class TestSDFConvergence:
+    async def test_changing_unconnected_output_never_false_converges(self):
+        """Regression: comparing port.peek() watched the oldest buffered
+        token, so [1, 2, 3] looked stable because the head stayed 1."""
+
+        @entity
+        class _Changing(Entity):
+            outs = {"x": OutputPort(name="x", accepted_types=["int"])}
+
+            def __init__(self, node_id):
+                super().__init__(node_id=node_id)
+                self.n = 0
+
+            async def fire(self, ctx):  # type: ignore[override]
+                self.n += 1
+                self.outs["x"].emit(TypedValue(type="int", payload=self.n))
+
+        g = CompositeGraph("changing-unconnected")
+        g.add_entity("c", _Changing("c"))
+        result = await SDFDirector(max_iterations=4, convergence_k=2).run(
+            g, RunContext(run_id="changing")
+        )
+
+        assert result.converged is False
+        assert result.iterations == 4
+        assert [
+            token.value.payload for token in g.node("c").instance.outs["x"]
+        ] == [1, 2, 3, 4]
+
+    async def test_connected_outputs_participate_in_convergence(self):
+        """Delivery drains connected ports, but their fire snapshots must
+        still be visible to the convergence algorithm."""
+        g = CompositeGraph("connected-stable")
+        g.add_entity("source", _Source("source", "same"))
+        g.connect("source.prompt", "__out__.result")
+
+        result = await SDFDirector(max_iterations=10, convergence_k=2).run(
+            g, RunContext(run_id="connected")
+        )
+
+        assert result.converged is True
+        assert result.iterations == 3
+        assert len(g.collected["__out__"]["result"]) == 3
+
     async def test_converges_on_stable_output(self):
         """A source that always emits the same value + a reviewer that
         approves after N rounds should converge in exactly N rounds."""
@@ -134,6 +177,7 @@ class TestSDFConvergence:
         d = SDFDirector(max_iterations=20, convergence_k=3)
         result = await d.run(g, RunContext(run_id=str(uuid.uuid4())))
         assert result.converged is True
-        # Reviewer approves at round 1; rounds 2, 3, 4 stable
-        # K=3 means stable for 3 rounds → converges on round 4
-        assert result.iterations == 4
+        # Synchronous rounds first propagate the explicit seed, then the
+        # source's normal output.  Only after those two lineage transitions
+        # can the reviewer accumulate three genuinely stable comparisons.
+        assert result.iterations == 6

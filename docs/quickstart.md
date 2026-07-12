@@ -13,7 +13,7 @@ can replay, audit, and debug.
 ## 1. Install
 
 ```bash
-git clone https://github.com/your-org/pharos
+git clone https://github.com/qiu01shi/pharos
 cd pharos
 uv sync --all-extras
 ```
@@ -75,7 +75,7 @@ uv run pharos validate graphs/02_llm_then_shell.yaml
 
 # List registered LLM providers
 uv run pharos list-providers
-# faux   glm   openai
+# anthropic   deepseek   faux   glm   minimax   openai
 
 # Check your environment
 uv run pharos doctor
@@ -132,14 +132,15 @@ Use it in a graph:
 ```yaml
 nodes:
   - id: counter
-    type: python:my_entities:WordCounter
+    type: python
+    class: "my_entities:WordCounter"
 edges:
   - { src: __in__.text,   dst: counter.text }
   - { src: counter.count, dst: __out__.result }
 ```
 
-*(Note: `python:module:Class` resolution for custom entities is
-planned for P2. For now, build your graph programmatically.)*
+The module must be importable in the environment that runs pharos. You can
+also construct the same graph programmatically with `CompositeGraph`.
 
 ---
 

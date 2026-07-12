@@ -34,7 +34,7 @@ from typing import Any
 from pharos.core.schema import validate as _validate_schema
 from pharos.testing.digest import Outputs, canonical_payload, chain_digest
 
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 2
 
 # Field policies used by the live verdict (Phase 3). Declared here so a fixture
 # can carry them, but the offline gate treats every declared assertion as hard.
@@ -158,7 +158,7 @@ class Fixture:
             grant=list(grant or []),
             var=dict(var or {}),
             outputs={k: list(v) for k, v in outputs.items()},
-            chain_digest=chain_digest(outputs),
+            chain_digest=chain_digest(outputs, version=FIXTURE_VERSION),
             assertions=list(assertions or []),
         )
 
@@ -198,7 +198,8 @@ class Fixture:
             outputs=d.get("outputs", {}),
             chain_digest=d.get("chain_digest", ""),
             assertions=[Assertion.from_dict(a) for a in d.get("assertions", [])],
-            version=d.get("version", FIXTURE_VERSION),
+            # Unversioned fixtures predate the ordered/lineage digest.
+            version=d.get("version", 1),
         )
 
     def save(self, path: str | Path) -> Path:

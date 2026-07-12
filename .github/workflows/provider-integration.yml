@@ -1,0 +1,27 @@
+name: Provider Integration
+
+# Real API smoke tests are manual by default because they spend money. Once
+# repository secrets and a cost policy are configured, add a weekly schedule.
+on:
+  workflow_dispatch:
+
+jobs:
+  providers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_LINK_MODE: copy
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+      ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
+      MINIMAX_CN_API_KEY: ${{ secrets.MINIMAX_CN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --frozen
+      - name: Run configured provider smoke tests
+        run: uv run pytest -q -m integration tests/llm/test_integration.py

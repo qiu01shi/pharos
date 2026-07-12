@@ -1,86 +1,130 @@
-"""Minimal JSON Schema validator — the "types cross LLM boundaries" contract.
-
-pharos ports already gate the coarse *type tag* (text / json / int). This module
-adds *shape* validation for `json` payloads so a port can declare, e.g.,
-``{"type": "object", "required": ["file", "line"], ...}`` and reject an LLM
-that emits ``{"path": ..., "ln": ...}`` — exactly the promise made in
-``docs/architecture.md``.
-
-It is intentionally a small, self-contained subset (no new dependency): the
-keywords LLM structured output actually needs — ``type`` (object / array /
-string / number / integer / boolean / null, or a list of them), ``properties``,
-``required``, ``items``, and ``enum``. Unknown keywords are ignored rather than
-rejected, so a fuller JSON Schema still validates its supported parts.
-"""
+"""JSON Schema 2020-12 validation and conservative contract comparison."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Iterable
 from typing import Any
 
-# type name -> predicate. `integer`/`number` exclude bool because in Python
-# `bool` is an `int` subclass and an LLM emitting `true` for an integer field
-# should fail the contract.
-_TYPE_CHECKS: dict[str, Callable[[Any], bool]] = {
-    "object": lambda v: isinstance(v, dict),
-    "array": lambda v: isinstance(v, list),
-    "string": lambda v: isinstance(v, str),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-    "boolean": lambda v: isinstance(v, bool),
-    "null": lambda v: v is None,
-}
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
+
+def check_schema(
+    schema: dict[str, Any], *, require_constraints: bool = False
+) -> None:
+    """Raise ``ValueError`` when ``schema`` is not valid Draft 2020-12.
+
+    JSON Schema intentionally permits extension keywords, so a shorthand such
+    as ``{file: str}`` is technically valid but constrains nothing.  Authoring
+    entry points can set ``require_constraints`` to catch that common mistake.
+    """
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        path = ".".join(str(part) for part in exc.absolute_schema_path)
+        where = f" at {path}" if path else ""
+        raise ValueError(f"invalid JSON Schema{where}: {exc.message}") from exc
+    if require_constraints and not set(schema).intersection(
+        {
+            "$ref",
+            "allOf",
+            "anyOf",
+            "const",
+            "enum",
+            "not",
+            "oneOf",
+            "properties",
+            "required",
+            "type",
+        }
+    ):
+        raise ValueError(
+            "JSON Schema declares no constraints; use type/properties/required "
+            "instead of field-name shorthand"
+        )
 
 
 def validate(payload: Any, schema: dict[str, Any]) -> list[str]:
-    """Validate ``payload`` against ``schema``.
+    """Return deterministic, human-readable validation errors."""
+    try:
+        check_schema(schema)
+    except ValueError as exc:
+        return [f"$schema: {exc}"]
 
-    Returns a list of human-readable error messages; an empty list means the
-    payload conforms. Never raises for a malformed schema — unsupported
-    keywords are simply skipped.
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(payload),
+        key=lambda error: tuple(str(part) for part in error.absolute_path),
+    )
+    return [_format_error(error) for error in errors]
+
+
+def compatibility_errors(
+    producer: dict[str, Any], consumer: dict[str, Any]
+) -> list[str]:
+    """Find compile-time incompatibilities between two JSON contracts.
+
+    Full JSON Schema subsumption is expensive and sometimes undecidable.  The
+    compiler therefore rejects only contradictions it can prove: disjoint root
+    types, consumer-required object fields that the producer does not promise,
+    and disjoint declared types for shared properties.
     """
+    check_schema(producer)
+    check_schema(consumer)
     errors: list[str] = []
-    _validate(payload, schema, "$", errors)
+    producer_types = _types(producer.get("type"))
+    consumer_types = _types(consumer.get("type"))
+    if producer_types and consumer_types and producer_types.isdisjoint(consumer_types):
+        errors.append(
+            f"producer types {sorted(producer_types)} do not satisfy "
+            f"consumer types {sorted(consumer_types)}"
+        )
+        return errors
+
+    if "object" in producer_types and "object" in consumer_types:
+        promised = set(producer.get("required", []))
+        required = set(consumer.get("required", []))
+        missing = required - promised
+        if missing:
+            errors.append(f"producer does not require consumer fields {sorted(missing)}")
+
+        producer_props = producer.get("properties", {})
+        consumer_props = consumer.get("properties", {})
+        for name in sorted(set(producer_props) & set(consumer_props)):
+            left = _types(producer_props[name].get("type"))
+            right = _types(consumer_props[name].get("type"))
+            if left and right and left.isdisjoint(right):
+                errors.append(
+                    f"property {name!r} producer types {sorted(left)} do not "
+                    f"satisfy consumer types {sorted(right)}"
+                )
     return errors
 
 
-def _validate(
-    value: Any, schema: Any, path: str, errors: list[str]
-) -> None:
-    if not isinstance(schema, dict):
-        return
-
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{path}: {value!r} is not one of {schema['enum']!r}")
-
-    declared = schema.get("type")
-    if declared is not None:
-        allowed = declared if isinstance(declared, list) else [declared]
-        if not any(_TYPE_CHECKS.get(t, _always_ok)(value) for t in allowed):
-            errors.append(
-                f"{path}: expected type {declared!r}, got "
-                f"{type(value).__name__}"
-            )
-            # A wrong type makes nested checks meaningless.
-            return
-
-    if isinstance(value, dict):
-        for req in schema.get("required", []):
-            if req not in value:
-                errors.append(f"{path}: missing required property {req!r}")
-        for key, subschema in schema.get("properties", {}).items():
-            if key in value:
-                _validate(value[key], subschema, f"{path}.{key}", errors)
-
+def _types(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
     if isinstance(value, list):
-        item_schema = schema.get("items")
-        if isinstance(item_schema, dict):
-            for i, item in enumerate(value):
-                _validate(item, item_schema, f"{path}[{i}]", errors)
+        return {item for item in value if isinstance(item, str)}
+    return set()
 
 
-def _always_ok(_value: Any) -> bool:
-    return True
+def _json_path(parts: Iterable[Any]) -> str:
+    out = "$"
+    for part in parts:
+        out += f"[{part}]" if isinstance(part, int) else f".{part}"
+    return out
 
 
-__all__ = ["validate"]
+def _format_error(error: Any) -> str:
+    path = _json_path(error.absolute_path)
+    if error.validator == "type":
+        return f"{path}: expected type {error.validator_value!r}, got {type(error.instance).__name__}"
+    if error.validator == "required":
+        missing = str(error.message).split("'")[1]
+        return f"{path}: missing required property {missing!r}"
+    if error.validator == "enum":
+        return f"{path}: {error.instance!r} is not one of {error.validator_value!r}"
+    return f"{path}: {error.message}"
+
+
+__all__ = ["check_schema", "compatibility_errors", "validate"]

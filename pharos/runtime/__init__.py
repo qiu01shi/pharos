@@ -34,6 +34,8 @@ _MAX_RUNS = 100
 
 def _ensure_dir() -> None:
     _RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        _RUNS_DIR.chmod(0o700)
 
 
 def _run_path(run_id: str) -> Path:
@@ -221,6 +223,7 @@ def record_run(
 ) -> None:
     _ensure_dir()
     payload = {
+        "version": 2,
         "run_id": run_id,
         "recorded_at": datetime.now().isoformat(),
         "director": director or "",
@@ -245,7 +248,10 @@ def record_run(
             for s in spans
         ],
     }
-    _run_path(run_id).write_text(json.dumps(payload, indent=2, default=str))
+    run_path = _run_path(run_id)
+    run_path.write_text(json.dumps(payload, indent=2, default=str))
+    with contextlib.suppress(OSError):
+        run_path.chmod(0o600)
     _enforce_cap()
 
 
@@ -301,10 +307,22 @@ class RunRecorder:
         """A recorder that writes into the same dict under a nested prefix."""
         return RunRecorder(prefix=f"{self.prefix}{prefix}", data=self._data)
 
-    def capture(self, entity: Any, node_id: str, fire_index: int) -> None:
+    def capture(
+        self,
+        entity: Any,
+        node_id: str,
+        fire_index: int,
+        *,
+        emissions: dict[str, tuple[Any, ...]] | None = None,
+    ) -> None:
         emitted: list[dict[str, Any]] = []
         for port_name, port in entity.outs.items():
-            for tok in port.peek_all():
+            tokens = (
+                emissions.get(port_name, ())
+                if emissions is not None
+                else port.peek_all()
+            )
+            for tok in tokens:
                 emitted.append(
                     {
                         "port": port_name,
@@ -315,6 +333,12 @@ class RunRecorder:
                         "self_hash": tok.self_hash,
                         "prev_hash": tok.prev_hash,
                         "origin": tok.origin,
+                        "ts": tok.ts,
+                        "run_id": tok.run_id,
+                        "iter": tok.iter,
+                        "is_partial": tok.is_partial,
+                        "cost_usd": tok.cost_usd,
+                        "metadata": tok.metadata,
                     }
                 )
         self._data[f"{self.prefix}{node_id}:{fire_index}"] = emitted
@@ -355,13 +379,26 @@ class RunReplayer:
         return f"{node_id}:{fire_index}" in self._data
 
     def apply(self, entity: Any, node_id: str, fire_index: int) -> None:
-        from pharos.core.token import TypedValue
+        import time
+
+        from pharos.core.token import Token, TypedValue
 
         for rec in self._data.get(f"{node_id}:{fire_index}", []):
             port = entity.outs.get(rec["port"])
             if port is not None:
-                port.emit(
-                    TypedValue(type=rec["type"], payload=rec["payload"])
+                port.receive(
+                    Token(
+                        value=TypedValue(type=rec["type"], payload=rec["payload"]),
+                        origin=str(rec.get("origin", "")),
+                        ts=float(rec.get("ts", time.time())),
+                        prev_hash=rec.get("prev_hash"),
+                        self_hash=str(rec.get("self_hash", "")),
+                        run_id=str(rec.get("run_id", "")),
+                        iter=int(rec.get("iter", 0)),
+                        is_partial=bool(rec.get("is_partial", False)),
+                        cost_usd=float(rec.get("cost_usd", 0.0)),
+                        metadata=dict(rec.get("metadata", {})),
+                    )
                 )
 
 
