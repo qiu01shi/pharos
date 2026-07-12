@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import inspect
 import json
 import time
 from collections import deque
@@ -122,6 +123,9 @@ class RunContext:
     recorder: Any = None  # runtime.RunRecorder — captures entity outputs
     replayer: Any = None  # runtime.RunReplayer — replays recorded outputs
     budget: RunBudget | None = None  # optional run-level spend cap
+    # Optional async/sync callback used by local control planes to receive
+    # lifecycle events without changing Director semantics.
+    event_sink: Any = None
 
     def policy(self) -> PermissionPolicy:
         """The authorisation policy for this run (from granted_permissions)."""
@@ -304,13 +308,35 @@ async def safe_fire(
         getattr(replayer, "resume", False) and not replay_this
     )
 
+    fire_started_at = time.time()
+    lifecycle = {
+        "node_id": entity.node_id,
+        "entity_class": type(entity).__name__,
+        "step_id": fire_ctx.step_id,
+        "iteration": fire_ctx.iter,
+        "fire_index": fire_index,
+    }
+    await emit_run_event(run_ctx, "fire.started", lifecycle)
+
     # Live fires are permission-gated and set up; replayed fires are not
     # (they never execute, so they need no client / API key / grant).
-    if live:
-        check_permissions(entity, run_ctx)
-        if not getattr(entity, "_initialized", False):
-            await entity.setup(run_ctx)
-            entity._initialized = True
+    try:
+        if live:
+            check_permissions(entity, run_ctx)
+            if not getattr(entity, "_initialized", False):
+                await entity.setup(run_ctx)
+                entity._initialized = True
+    except BaseException as e:
+        await emit_run_event(
+            run_ctx,
+            "fire.failed",
+            {
+                **lifecycle,
+                "duration_ms": (time.time() - fire_started_at) * 1000,
+                "error": f"{type(e).__name__}: {e}",
+            },
+        )
+        raise
 
     tracer = getattr(run_ctx, "tracer", None)
     fire_ctx.tracer = tracer
@@ -370,18 +396,66 @@ async def safe_fire(
             before_total_cost=before_total_cost,
             emissions=emissions,
         )
+        if span is not None:
+            span.attributes["tokens"] = metrics[0]
+            span.attributes["cost_usd"] = metrics[1]
         budget = getattr(run_ctx, "budget", None)
         if budget is not None:
             budget.charge(metrics[0], metrics[1], span=span)
     except BaseException as e:
         if span is not None:
             span.record_exception(e)
+        await emit_run_event(
+            run_ctx,
+            "fire.failed",
+            {
+                **lifecycle,
+                "duration_ms": (time.time() - fire_started_at) * 1000,
+                "error": f"{type(e).__name__}: {e}",
+            },
+        )
         raise
     finally:
         if span is not None and tracer is not None:
             tracer.finish_span(span)
 
+    await emit_run_event(
+        run_ctx,
+        "fire.completed",
+        {
+            **lifecycle,
+            "duration_ms": (time.time() - fire_started_at) * 1000,
+            "tokens": metrics[0],
+            "cost_usd": metrics[1],
+        },
+    )
+
     return metrics
+
+
+async def emit_run_event(
+    run_ctx: RunContext, event_type: str, payload: dict[str, Any]
+) -> None:
+    """Publish a best-effort lifecycle event for local/hosted control planes.
+
+    Observability must never change execution semantics, so sink failures are
+    deliberately ignored. Every event carries its run id, type, and timestamp.
+    """
+    sink = getattr(run_ctx, "event_sink", None)
+    if sink is None:
+        return
+    event = {
+        "type": event_type,
+        "run_id": run_ctx.run_id,
+        "ts": time.time(),
+        **payload,
+    }
+    try:
+        result = sink(event)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass
 
 
 def _new_emissions(
@@ -555,6 +629,7 @@ __all__ = [
     "collect_metrics",
     "deliver_upstream",
     "emission_digest",
+    "emit_run_event",
     "input_lineage_digest",
     "safe_fire",
     "stamp_lineage",

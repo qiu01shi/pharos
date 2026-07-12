@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +16,9 @@ from rich.table import Table
 from pharos import __version__
 from pharos.core.graph import CompositeGraph
 from pharos.core.token import TypedValue
-from pharos.directors import make_director
-from pharos.directors.base import RunBudget, RunContext
+from pharos.directors.base import RunBudget
 from pharos.ir import load_graph, load_graph_from_text
 from pharos.observability.backend.console import ConsoleTraceBackend
-from pharos.observability.trace import InMemoryTracer
 
 app = typer.Typer(
     name="pharos",
@@ -223,6 +220,23 @@ def doctor() -> None:
         console.print(f"  {k}: {v}")
 
 
+@app.command()
+def serve(
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="Bind address (loopback recommended)"
+    ),
+    port: int = typer.Option(8765, "--port", help="Local Runtime API port"),
+) -> None:
+    """Start the local Runtime API used by Pharos Studio."""
+    from pharos.studio_api import run_server
+
+    console.print(
+        f"[green]Pharos Runtime API[/green] listening on "
+        f"[cyan]http://{host}:{port}[/cyan]"
+    )
+    run_server(host=host, port=port)
+
+
 def _which_version(cmd: str) -> str | None:
     import shutil
     import subprocess
@@ -363,70 +377,26 @@ async def _run_with_trace(
     budget: RunBudget | None = None,
     outputs_out: dict[str, Any] | None = None,
 ) -> tuple[Any, ConsoleTraceBackend | None]:
-    from pharos.runtime import RunRecorder, record_run
+    from pharos.runtime.executor import execute_graph
 
-    tracer = InMemoryTracer()
     backend = ConsoleTraceBackend() if want_trace else None
-    # Record entity outputs for live runs and for resume (so the resumed run
-    # is itself a complete, replayable recording). Pure replay does not record.
-    resume_mode = replayer is not None and getattr(replayer, "resume", False)
-    recorder = RunRecorder() if (replayer is None or resume_mode) else None
-    ctx = RunContext(
-        run_id=str(uuid.uuid4()),
-        granted_permissions=granted_permissions or set(),
-        tracer=tracer,
-        recorder=recorder,
+    outcome = await execute_graph(
+        g,
+        director_name,
+        max_iters=max_iters,
+        converge_k=converge_k,
+        granted_permissions=granted_permissions,
         replayer=replayer,
         budget=budget,
     )
-
-    d = make_director(
-        director_name, max_iters=max_iters, converge_k=converge_k
-    )
-
-    result = await d.run(g, ctx)
     if backend is not None:
-        for s in tracer.spans:
+        for s in outcome.spans:
             backend.write(s)
-    # Always record (P2: persisted; P1: in-memory)
-    record_run(
-        ctx.run_id,
-        tracer.spans,
-        outputs=recorder.to_dict() if recorder is not None else None,
-        director=director_name,
-    )
-    await _index_run_sqlite(ctx.run_id, tracer.spans, director_name, result)
     # Expose the captured entity outputs so `run --record-fixture` can build a
     # fixture from the same live run instead of executing the graph twice.
-    if outputs_out is not None and recorder is not None:
-        outputs_out.update(recorder.to_dict())
-    return result, backend
-
-
-async def _index_run_sqlite(
-    run_id: str, spans: Any, director_name: str, result: Any
-) -> None:
-    """Index a finished run into SQLite for `pharos trace query`.
-
-    Best-effort: a trace-store failure must never fail the run itself.
-    """
-    import contextlib
-    from datetime import datetime
-
-    with contextlib.suppress(Exception):
-        from pharos.observability.backend.sqlite import SQLiteTraceBackend
-
-        error = getattr(result, "error", None)
-        await SQLiteTraceBackend().index_run(
-            run_id,
-            list(spans),
-            director=director_name,
-            total_tokens=getattr(result, "tokens_emitted", 0) or 0,
-            total_cost=getattr(result, "cost_usd", 0.0) or 0.0,
-            status="error" if error else "ok",
-            error=error,
-            recorded_at=datetime.now().isoformat(),
-        )
+    if outputs_out is not None:
+        outputs_out.update(outcome.outputs)
+    return outcome.result, backend
 
 
 def _trace_query(

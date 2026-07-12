@@ -138,6 +138,7 @@ class SubgraphEntity(Entity):
             # Replay is handled at this node's output boundary by the parent
             # safe_fire, so the child sub-run always executes live.
             replayer=None,
+            event_sink=getattr(ctx, "event_sink", None),
         )
         director = make_director(
             self.director_name,
