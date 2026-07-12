@@ -13,6 +13,7 @@ Indexing is best-effort: a trace-store failure must never fail a run.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,11 @@ class SQLiteTraceBackend:
 
     async def _connect(self) -> aiosqlite.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            self.path.parent.chmod(0o700)
         db = await aiosqlite.connect(str(self.path))
+        with contextlib.suppress(OSError):
+            self.path.chmod(0o600)
         await db.executescript(_SCHEMA)
         return db
 

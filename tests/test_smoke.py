@@ -5,7 +5,7 @@ def test_imports():
     """All top-level modules should import without errors."""
     import pharos
 
-    assert pharos.__version__ == "0.1.0"
+    assert pharos.__version__ == "0.3.0"
 
 
 def test_python_version():

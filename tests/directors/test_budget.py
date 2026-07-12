@@ -10,6 +10,7 @@ from pharos.directors.base import (
     RunContext,
 )
 from pharos.directors.fn import FNDirector
+from pharos.directors.sdf import SDFDirector
 from pharos.ir import load_graph_from_dict
 
 
@@ -65,6 +66,49 @@ class TestRunBudgetUnit:
 
 
 class TestBudgetThroughDirector:
+    async def test_sdf_charges_per_fire_delta_not_cumulative_total(self):
+        raw = {
+            "name": "one-call-many-rounds",
+            "director": "sdf",
+            "nodes": [_two_llm_graph()["nodes"][0]],
+            "edges": [],
+        }
+        g, _ = load_graph_from_dict(raw)
+        g.node("a").instance.ins["prompt"].emit(
+            TypedValue(type="text", payload="once")
+        )
+        budget = RunBudget(max_tokens=10_000, mode="soft")
+
+        result = await SDFDirector(max_iterations=3, convergence_k=99).run(
+            g, RunContext(run_id="delta", budget=budget)
+        )
+
+        assert g.node("a").instance.total_tokens == 100
+        assert result.tokens_emitted == 100
+        assert budget.spent_tokens == 100
+
+    async def test_graph_reset_allows_clean_reuse(self):
+        g, _ = load_graph_from_dict(_two_llm_graph())
+        _seed(g, "first")
+        first = await FNDirector().run(g, RunContext(run_id="first"))
+        assert first.tokens_emitted == 200
+        assert len(g.collected["__out__"]["result"]) == 1
+
+        g.reset_run_state()
+        assert g.collected == {}
+        assert g.node("a").instance.total_tokens == 0
+        assert all(
+            len(port) == 0
+            for node in g.nodes.values()
+            if node.instance is not None
+            for port in (*node.instance.ins.values(), *node.instance.outs.values())
+        )
+
+        _seed(g, "second")
+        second = await FNDirector().run(g, RunContext(run_id="second"))
+        assert second.tokens_emitted == 200
+        assert len(g.collected["__out__"]["result"]) == 1
+
     async def test_hard_budget_aborts_run(self):
         g, _ = load_graph_from_dict(_two_llm_graph())
         _seed(g, "go")

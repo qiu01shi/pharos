@@ -21,6 +21,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from pharos.observability.redaction import redact
+
 # Thread-/task-local current span. ContextVar works across asyncio tasks.
 _active_span: ContextVar[Span | None] = ContextVar("pharos_active_span", default=None)
 
@@ -43,6 +45,7 @@ MAX_ATTR_CHARS = _int_env("PHAROS_TRACE_MAX_ATTR", 16384)
 
 def _truncate_value(value: Any, max_chars: int) -> Any:
     """Recursively cap long strings inside an attribute value."""
+    value = redact(value)
     if isinstance(value, str):
         if len(value) > max_chars:
             return value[:max_chars] + f"...(truncated {len(value) - max_chars} chars)"
@@ -55,7 +58,10 @@ def _truncate_value(value: Any, max_chars: int) -> Any:
 
 
 def _truncate_attrs(attrs: dict[str, Any], max_chars: int) -> dict[str, Any]:
-    return {k: _truncate_value(v, max_chars) for k, v in attrs.items()}
+    return {
+        k: _truncate_value(redact(v, key=k), max_chars)
+        for k, v in attrs.items()
+    }
 
 
 def current_trace_id() -> str | None:
@@ -113,10 +119,12 @@ class Span:
         return (self.ended_at - self.started_at) * 1000
 
     def set_attribute(self, key: str, value: Any) -> None:
-        self.attributes[key] = value
+        self.attributes[key] = _truncate_value(
+            redact(value, key=key), self.max_attr_chars
+        )
 
     def set_attributes(self, attrs: dict[str, Any]) -> None:
-        self.attributes.update(attrs)
+        self.attributes.update(_truncate_attrs(redact(attrs), self.max_attr_chars))
 
     def record_event(
         self,

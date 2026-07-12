@@ -86,11 +86,11 @@ def run(
     ),
     json_out: bool = typer.Option(False, "--json", help="Output JSON"),
     trace: bool = typer.Option(False, "--trace", help="Show trace after run"),
-    max_iters: int = typer.Option(
-        20, "--max-iters", help="Max iterations (SDF only)"
+    max_iters: int | None = typer.Option(
+        None, "--max-iters", help="Override graph execution.max_iterations"
     ),
-    converge_k: int = typer.Option(
-        2, "--converge-k", help="Convergence K (SDF only)"
+    converge_k: int | None = typer.Option(
+        None, "--converge-k", help="Override graph execution.convergence_k"
     ),
     max_cost: float | None = typer.Option(
         None, "--max-cost", help="Abort the run above this USD cost"
@@ -136,6 +136,9 @@ def run(
     _seed_inputs(g, seed_map)
     _apply_answers(g, answer)
     director_name = raw.get("director", "fn")
+    execution = raw.get("execution", {}) or {}
+    effective_max_iters = max_iters or int(execution.get("max_iterations", 20))
+    effective_converge_k = converge_k or int(execution.get("convergence_k", 2))
     budget = _build_budget(raw.get("budget"), max_cost, max_tokens, budget_mode)
     captured: dict[str, Any] = {}
     result, _backend = asyncio.run(
@@ -143,8 +146,8 @@ def run(
             g,
             director_name,
             trace,
-            max_iters,
-            converge_k,
+            effective_max_iters,
+            effective_converge_k,
             granted_permissions=set(grant),
             budget=budget,
             outputs_out=captured if record_fixture else None,
@@ -481,6 +484,11 @@ def trace(
         "--otlp",
         help="Export the run's spans as OTLP/JSON to this path instead of printing",
     ),
+    export: Path | None = typer.Option(
+        None,
+        "--export",
+        help="Export the native run JSON for Pharos Studio",
+    ),
     entity: str | None = typer.Option(
         None, "--entity", help="[query] filter to runs containing this entity"
     ),
@@ -526,6 +534,13 @@ def trace(
         console.print(f"[red]No run with id {run_id!r}[/red]")
         console.print("Try [cyan]pharos trace list[/cyan] to see available runs.")
         raise typer.Exit(code=1)
+
+    if export is not None:
+        from pharos.runtime import export_run_json
+
+        export_run_json(run_id, export)
+        console.print(f"[green]Exported native run to {export}[/green]")
+        return
 
     if otlp is not None:
         from pharos.observability.otlp import write_otlp_json

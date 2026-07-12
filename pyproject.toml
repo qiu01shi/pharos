@@ -1,6 +1,6 @@
 [project]
-name = "pharos"
-version = "0.2.0"
+name = "pharos-runtime"
+dynamic = ["version"]
 description = "Typed dataflow runtime for LLM workflows with first-class trace and replay"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["llm", "agent", "multi-agent", "dataflow", "trace", "replay"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -27,6 +27,7 @@ dependencies = [
     "rich>=13.7",
     "pyyaml>=6.0",
     "aiosqlite>=0.20",
+    "jsonschema>=4.22",
 ]
 
 [project.optional-dependencies]
@@ -36,8 +37,9 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.5",
     "mypy>=1.10",
+    "types-jsonschema>=4.22",
 ]
-all = ["pharos[dev]"]
+all = ["pharos-runtime[dev]"]
 
 [project.scripts]
 pharos = "pharos.cli:cli_main"
@@ -53,6 +55,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pharos"]
+
+[tool.hatch.version]
+path = "pharos/__init__.py"
 
 # ==================== Ruff ====================
 [tool.ruff]

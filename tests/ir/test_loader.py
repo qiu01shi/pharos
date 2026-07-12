@@ -118,6 +118,15 @@ class TestNodeSpecs:
                 }
             )
 
+    def test_llm_rejects_non_constraining_schema_shorthand(self):
+        with pytest.raises(ValueError, match="field-name shorthand"):
+            LLMNodeSpec(
+                id="x",
+                provider="faux",
+                model="faux-fast",
+                output_schema={"file": "str", "line": "int"},
+            )
+
     def test_shell_spec_defaults(self):
         s = ShellNodeSpec(id="x")
         assert s.timeout == 300.0
@@ -131,3 +140,14 @@ class TestGraphSpec:
         )
         assert s.director == "fn"
         assert len(s.nodes) == 1
+        assert s.api_version == "pharos.ai/v1"
+
+    def test_rejects_unknown_ir_version(self):
+        with pytest.raises(ValueError, match="unsupported IR"):
+            GraphSpec.model_validate(
+                {
+                    "apiVersion": "pharos.ai/v99",
+                    "name": "x",
+                    "nodes": [],
+                }
+            )

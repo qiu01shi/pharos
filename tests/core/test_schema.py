@@ -1,4 +1,4 @@
-"""Tests for the minimal JSON Schema validator (pharos.core.schema)."""
+"""Tests for the JSON Schema 2020-12 validator."""
 from __future__ import annotations
 
 from pharos.core.schema import validate
@@ -68,6 +68,15 @@ class TestArraysAndEnums:
         assert validate("low", schema) == []
         assert validate("mid", schema)
 
-    def test_unknown_keyword_ignored(self):
-        # Unsupported keywords must not cause spurious failures.
-        assert validate("x", {"type": "string", "minLength": 100}) == []
+    def test_standard_string_constraints_are_enforced(self):
+        assert validate("x", {"type": "string", "minLength": 1}) == []
+        assert validate("x", {"type": "string", "minLength": 2})
+
+    def test_additional_properties(self):
+        schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        assert validate({"ok": True}, schema) == []
+        assert validate({"extra": True}, schema)

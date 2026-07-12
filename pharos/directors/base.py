@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -335,6 +336,9 @@ async def safe_fire(
     # Snapshot input lineage BEFORE fire() consumes the input ports, so the
     # tokens this fire emits can carry a prev_hash derived from their inputs.
     prev_digest = input_lineage_digest(entity)
+    output_offsets = {name: len(port) for name, port in entity.outs.items()}
+    before_total_tokens = getattr(entity, "total_tokens", None)
+    before_total_cost = getattr(entity, "total_cost", None)
 
     metrics = (0, 0.0)
     try:
@@ -348,11 +352,24 @@ async def safe_fire(
         # Stamp real origin + lineage onto freshly emitted tokens (shared by
         # live and replay paths so recorded and replayed hashes agree).
         stamp_lineage(entity, prev_digest)
+        emissions = _new_emissions(entity, output_offsets)
+        # Keep an immutable per-fire fingerprint on the entity.  Directors
+        # inspect this after concurrent fires complete; unlike port buffers it
+        # is unaffected by downstream delivery or old unconnected outputs.
+        entity._last_emissions = emissions
+        entity._last_emission_digest = emission_digest(entity, emissions)
         if recorder is not None:
-            recorder.capture(entity, entity.node_id, fire_index)
+            recorder.capture(
+                entity, entity.node_id, fire_index, emissions=emissions
+            )
         # Metrics + budget are charged inside the try so a hard-budget abort
         # can annotate this fire's span before it closes.
-        metrics = collect_metrics(entity)
+        metrics = collect_metrics(
+            entity,
+            before_total_tokens=before_total_tokens,
+            before_total_cost=before_total_cost,
+            emissions=emissions,
+        )
         budget = getattr(run_ctx, "budget", None)
         if budget is not None:
             budget.charge(metrics[0], metrics[1], span=span)
@@ -367,20 +384,61 @@ async def safe_fire(
     return metrics
 
 
-def collect_metrics(entity: Any) -> tuple[int, float]:
-    """Read (token_count, cost) from an entity after it fires.
+def _new_emissions(
+    entity: Any, output_offsets: dict[str, int]
+) -> dict[str, tuple[Token, ...]]:
+    """Return only tokens appended by the current fire."""
+    return {
+        name: tuple(port.peek_all()[output_offsets.get(name, 0) :])
+        for name, port in entity.outs.items()
+    }
 
-    Prefers entity-level cumulative counters (LLMAgent tracks
-    `total_tokens` / `total_cost` directly); falls back to counting
-    output-port tokens for entities that don't. Shared by all Directors
-    so the reported numbers are consistent across scheduling semantics.
+
+def emission_digest(
+    entity: Any, emissions: dict[str, tuple[Token, ...]]
+) -> str:
+    """Stable ordered fingerprint of one entity fire's emitted tokens."""
+    canonical = [
+        (name, [token.self_hash for token in emissions.get(name, ())])
+        for name in sorted(entity.outs)
+    ]
+    return hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+
+
+def collect_metrics(
+    entity: Any,
+    *,
+    before_total_tokens: Any = None,
+    before_total_cost: Any = None,
+    emissions: dict[str, tuple[Token, ...]] | None = None,
+) -> tuple[int, float]:
+    """Read this fire's ``(token_count, cost)`` delta.
+
+    Entities such as LLMAgent expose cumulative counters, so subtract their
+    pre-fire values.  Entities without counters fall back to only the tokens
+    appended during this fire.  Never charge an old cumulative total again.
     """
-    token_count = getattr(entity, "total_tokens", 0) or sum(
-        len(p) for p in entity.outs.values()
-    )
-    cost = getattr(entity, "total_cost", 0.0) or sum(
-        t.cost_usd for p in entity.outs.values() for t in p.peek_all()
-    )
+    after_tokens = getattr(entity, "total_tokens", None)
+    if isinstance(after_tokens, (int, float)) and isinstance(
+        before_total_tokens, (int, float)
+    ):
+        token_count = max(0, int(after_tokens - before_total_tokens))
+    else:
+        token_count = sum(len(tokens) for tokens in (emissions or {}).values())
+
+    after_cost = getattr(entity, "total_cost", None)
+    if isinstance(after_cost, (int, float)) and isinstance(
+        before_total_cost, (int, float)
+    ):
+        cost = max(0.0, float(after_cost - before_total_cost))
+    else:
+        cost = sum(
+            token.cost_usd
+            for tokens in (emissions or {}).values()
+            for token in tokens
+        )
     return (token_count, cost)
 
 
@@ -401,7 +459,7 @@ async def teardown_all(graph: CompositeGraph) -> None:
         with contextlib.suppress(Exception):
             await inst.teardown()
         inst._initialized = False  # type: ignore[attr-defined]
-        inst._fire_count = 0  # type: ignore[attr-defined]
+        inst._fire_count = 0
 
 
 async def deliver_upstream(
@@ -446,11 +504,7 @@ async def deliver_upstream(
             if dst_node.instance is None:
                 # Virtual node (e.g. __out__): collect onto the graph
                 # so the CLI / Replay can read the result.
-                if not hasattr(graph, "collected"):
-                    graph.collected = {}  # type: ignore[attr-defined]
-                coll = graph.collected.setdefault(  # type: ignore[attr-defined]
-                    dst_node_id, {}
-                )
+                coll = graph.collected.setdefault(dst_node_id, {})
                 coll.setdefault(dst_port_name, []).extend(tokens)
                 continue
             dst_port = dst_node.instance.ins.get(dst_port_name)
@@ -500,6 +554,7 @@ __all__ = [
     "check_permissions",
     "collect_metrics",
     "deliver_upstream",
+    "emission_digest",
     "input_lineage_digest",
     "safe_fire",
     "stamp_lineage",

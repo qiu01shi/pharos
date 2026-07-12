@@ -28,19 +28,18 @@ pharos takes a different stance:
    bad patch. (`pharos/core/port.py`)
 
 2. **Every token carries lineage.** A `Token` is frozen and includes
-   `prev_hash` + `self_hash` + `ts` + `run_id` + `cost_usd`. Re-running
-   the same graph with the same input must produce the same head
-   token hash — if it doesn't, something changed and you want to
-   know. (`pharos/core/token.py`)
+   `prev_hash` + `self_hash` + `ts` + `run_id` + `cost_usd`. Its content
+   hash deliberately excludes wall-clock and run identity, so deterministic
+   graph executions can be compared across runs. (`pharos/core/token.py`)
 
 3. **Trace is built in, not bolted on.** Every `Entity.fire()` is
    wrapped in a `Span` by the Director. Every port emit is logged.
    You can replay a run later by re-executing the trace. (`pharos/directors/fn.py`, `pharos/observability/trace.py`)
 
-4. **Directors are pluggable.** `FN` (one-shot, topologically) covers
-   most cases today. `DE` (discrete-event), `PN` (process network),
-   `SDF` (synchronous data flow, with feedback loops), and `CT`
-   (continuous-time / event-driven) ship in later phases.
+4. **Directors are pluggable.** `FN` (one-shot, topologically), `DE`
+   (discrete-event), and `SDF` (synchronous rounds with feedback loops)
+   ship today. Additional semantics should be added only for validated use
+   cases.
 
 5. **No subprocess boundary for LLM calls.** subprocess startup is
    500ms — the original `pi-director` (the project's predecessor)
@@ -66,7 +65,7 @@ pharos takes a different stance:
                    │
 ┌──────────────────▼───────────────────────────────────────────┐
 │  Runtime                                                     │
-│    Director (FN, DE, PN, SDF, CT) ── schedules fires          │
+│    Director (FN, DE, SDF) ── schedules fires                  │
 │    Tracer  ── records every span (OTel-compatible)            │
 │    Cost   ── aggregates token usage and $$                  │
 │    Replay ── reproduces a run from trace                     │
@@ -105,7 +104,7 @@ class Token:
     origin: str             # "node_id.port_name"
     ts: float
     prev_hash: str | None
-    self_hash: str          # sha256 of canonical(value + prev_hash + ts + origin)
+    self_hash: str          # sha256 of canonical(value + prev_hash + origin + iter)
     run_id: str
     iter: int
     is_partial: bool
@@ -168,17 +167,16 @@ Token delivery to a virtual `__out__` is collected onto
 
 ## The Director abstraction
 
-A `Director` is the scheduler. Five semantics ship in planned phases:
+A `Director` is the scheduler. Three semantics currently ship:
 
 | Director | When it fires | When it stops |
 | --- | --- | --- |
 | `FN` (Function) | Topological order, same layer runs concurrently | One pass |
 | `DE` (Discrete Event) | Whenever an input port receives a new token | All buffers empty |
-| `PN` (Process Network) | Each entity is a long-lived process; messages flow over a bus | Explicit signal |
 | `SDF` (Synchronous Data Flow) | Production/consumption rates; supports feedback loops | `max_iter` or fixed-point reached (K-of-N token-hash) |
-| `CT` (Continuous Time) | External events (WebSocket, file watch, cron) | Explicit close |
 
-`FN` ships today. Others in P1+.
+New Directors require explicit firing, termination, checkpoint, and replay
+contracts before they are added.
 
 ---
 
@@ -286,10 +284,12 @@ call.
 
 - ❌ **No general agent OS.** pharos is a platform primitive, not a
   consumer product.
-- ❌ **No visual drag-and-drop editor.** YAML graphs are the source
-  of truth. A TUI workbench is a possible P5 addition.
-- ❌ **No multi-language runtime.** Python only; if you need TypeScript
-  agents, talk to pharos via HTTP / IPC.
+- ⚠️ **Studio is a local inspection workbench, not yet a full editor.** It can
+  load YAML/JSON graphs and recorded runs, validate references, inspect nodes,
+  and overlay execution traces. Editing and round-trip persistence come next.
+- ⚠️ **Remote/container execution is a leaf-node boundary.** Any language can
+  implement `pharos.worker/v1`, but the Pharos process still owns scheduling,
+  retries, budgets, authorization, and graph state.
 - ❌ **No automatic distributed execution.** Single-process by
   design. Distributed comes much later (P9+).
 - ❌ **No LangChain dependency.** The LLM layer is implemented
@@ -302,10 +302,10 @@ call.
 
 | Phase | What ships | Status |
 | --- | --- | --- |
-| **P0** | Core + FN Director + FauxProvider + trace + perf baseline | ✅ done |
-| **P1** | OpenAI + GLM providers, YAML IR, CLI, real bug-fix workflow | 🚧 in progress |
-| **P2** | Anthropic / DeepSeek / MiniMax providers, Router, Memory, case study | pending |
-| **P3** | DE / PN / SDF / CT directors, feedback loops | pending |
-| **P4+** | TUI viewer, web dashboard, cost analytics, observability export | pending |
+| **Foundation** | Core, FN/DE/SDF, providers, trace/replay, Agent CI | ✅ shipped |
+| **Correctness** | Per-fire accounting, stable convergence, graph reset, typed compile checks | ✅ shipped |
+| **Authoring** | Versioned IR, Python builder, team templates, Studio inspector | ✅ foundation |
+| **Interop** | Container/remote entities and worker protocol | ✅ foundation |
+| **Scale** | Durable distributed control plane | demand-driven |
 
 See `docs/P0-COMPLETE.md` for the detailed P0 retrospective.

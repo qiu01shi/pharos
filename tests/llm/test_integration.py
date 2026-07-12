@@ -2,8 +2,7 @@
 
 These tests are SKIPPED by default (require real API keys). To run:
 
-    OPENAI_API_KEY=sk-...   uv run pytest tests/llm/test_integration.py
-    GLM_API_KEY=...         uv run pytest tests/llm/test_integration.py
+    OPENAI_API_KEY=sk-... uv run pytest -m integration tests/llm/test_integration.py
 
 If a key isn't set, that provider's tests are skipped. If the
 provider rejects the key (e.g. invalid), the test fails with the
@@ -18,7 +17,10 @@ import os
 
 import pytest
 
+from pharos.llm.providers.anthropic import AnthropicProvider
+from pharos.llm.providers.deepseek import DeepSeekProvider
 from pharos.llm.providers.glm import GLMProvider
+from pharos.llm.providers.minimax import MiniMaxProvider
 from pharos.llm.providers.openai import OpenAIProvider
 from pharos.llm.types import Context, UserMessage
 
@@ -84,11 +86,50 @@ class TestOpenAIIntegration:
 )
 class TestGLMIntegration:
     async def test_basic_call_glm_4_5_air(self):
-        key = _require_key("GLM_API_KEY") or _require_key("ARK_API_KEY")
+        key = os.environ.get("GLM_API_KEY") or _require_key("ARK_API_KEY")
         p = GLMProvider(api_key=key)
         try:
             text = await _one_call(p, "glm-4.5-air")
             assert text, "empty response"
             assert isinstance(text, str)
+        finally:
+            await p.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY"),
+    reason="ANTHROPIC_API_KEY not set",
+)
+class TestAnthropicIntegration:
+    async def test_basic_call(self):
+        p = AnthropicProvider(api_key=_require_key("ANTHROPIC_API_KEY"))
+        try:
+            assert await _one_call(p, "claude-sonnet-4-20250514")
+        finally:
+            await p.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("DEEPSEEK_API_KEY"),
+    reason="DEEPSEEK_API_KEY not set",
+)
+class TestDeepSeekIntegration:
+    async def test_basic_call(self):
+        p = DeepSeekProvider(api_key=_require_key("DEEPSEEK_API_KEY"))
+        try:
+            assert await _one_call(p, "deepseek-chat")
+        finally:
+            await p.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MINIMAX_CN_API_KEY"),
+    reason="MINIMAX_CN_API_KEY not set",
+)
+class TestMiniMaxIntegration:
+    async def test_basic_call(self):
+        p = MiniMaxProvider(api_key=_require_key("MINIMAX_CN_API_KEY"))
+        try:
+            assert await _one_call(p, "MiniMax-Text-01")
         finally:
             await p.close()

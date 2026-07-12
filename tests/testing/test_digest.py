@@ -19,7 +19,7 @@ class TestChainDigest:
     def test_deterministic(self):
         assert chain_digest(_outputs()) == chain_digest(_outputs())
 
-    def test_order_independent(self):
+    def test_mapping_and_json_object_order_independent(self):
         reordered = {
             "b:0": [
                 {"port": "json", "type": "json", "payload": {"ok": True, "line": 42}}
@@ -37,9 +37,7 @@ class TestChainDigest:
         }
         assert chain_digest(_outputs()) != chain_digest(changed)
 
-    def test_ignores_lineage_metadata(self):
-        # A run recorded with self_hash/prev_hash/origin must digest the same
-        # as the bare payload — chain_digest is content-based.
+    def test_v2_includes_lineage_metadata(self):
         with_meta = {
             "a:0": [
                 {
@@ -55,7 +53,23 @@ class TestChainDigest:
                 {"port": "json", "type": "json", "payload": {"line": 42, "ok": True}}
             ],
         }
-        assert chain_digest(with_meta) == chain_digest(_outputs())
+        assert chain_digest(with_meta) != chain_digest(_outputs())
+        assert chain_digest(with_meta, version=1) == chain_digest(
+            _outputs(), version=1
+        )
+
+    def test_v2_preserves_record_order(self):
+        forward = {
+            "a:0": [
+                {"port": "y", "type": "text", "payload": "first"},
+                {"port": "y", "type": "text", "payload": "second"},
+            ]
+        }
+        reverse = {"a:0": list(reversed(forward["a:0"]))}
+        assert chain_digest(forward) != chain_digest(reverse)
+        assert chain_digest(forward, version=1) == chain_digest(
+            reverse, version=1
+        )
 
     def test_empty(self):
         assert chain_digest({}) == hashlib.sha256(b"").hexdigest()

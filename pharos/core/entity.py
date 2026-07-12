@@ -92,6 +92,24 @@ class Entity(ABC):
         """Override to release resources acquired in setup()."""
         return None
 
+    def reset_run_state(self) -> None:
+        """Reset mutable state before reusing this instance for a new run.
+
+        The base implementation owns port buffers and Director bookkeeping.
+        Stateful subclasses may extend this method, but durable application
+        state (for example a Memory entity configured to persist) should not
+        be cleared unless that subclass explicitly chooses to do so.
+        """
+        if getattr(self, "_initialized", False):
+            raise RuntimeError(
+                f"cannot reset active entity {self.node_id!r}; finish teardown first"
+            )
+        for port in (*self.ins.values(), *self.outs.values()):
+            port.reset()
+        self._fire_count = 0
+        self._last_emission_digest = ""
+        self._last_emissions: dict[str, tuple[Any, ...]] = {}
+
 
 _PortT = TypeVar("_PortT", InputPort, OutputPort)
 

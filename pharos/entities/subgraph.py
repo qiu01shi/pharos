@@ -101,7 +101,7 @@ class SubgraphEntity(Entity):
 
         sub = self.subgraph
         # Reset any collected outputs from a previous fire (SDF/DE loops).
-        sub.collected = {}  # type: ignore[attr-defined]
+        sub.collected = {}
 
         # 1. Collect this node's inputs, keyed by the child's internal port.
         seeds: dict[str, list[Any]] = {}
@@ -165,6 +165,12 @@ class SubgraphEntity(Entity):
         from pharos.directors.base import teardown_all
 
         await teardown_all(self.subgraph)
+
+    def reset_run_state(self) -> None:
+        super().reset_run_state()
+        self.subgraph.reset_run_state()
+        self.total_tokens = 0
+        self.total_cost = 0.0
 
 
 __all__ = ["SubgraphEntity"]

@@ -92,6 +92,13 @@ class RetryEntity(Entity):
     async def teardown(self) -> None:
         await self.inner.teardown()
 
+    def reset_run_state(self) -> None:
+        super().reset_run_state()
+        self.inner.reset_run_state()
+        self.attempts_used = 0
+        self.total_tokens = 0
+        self.total_cost = 0.0
+
     async def fire(self, ctx) -> None:
         # Snapshot inputs once so every attempt sees the same data.
         snapshot = {name: port.consume() for name, port in self.ins.items()}

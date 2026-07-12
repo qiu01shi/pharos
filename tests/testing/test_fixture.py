@@ -65,6 +65,7 @@ class TestFixtureRoundtrip:
         fx.save(p)
         loaded = Fixture.load(p)
         assert loaded.name == "t"
+        assert loaded.version == 2
         assert loaded.chain_digest == fx.chain_digest
         assert loaded.director == "fn"
         assert loaded.seed == {"prompt": "x"}
@@ -78,3 +79,14 @@ class TestFixtureRoundtrip:
         )
         fx.graph_sha256 = "0" * 64  # simulate the graph having changed
         assert fx.graph_matches() is False
+
+    def test_unversioned_fixture_loads_as_legacy_v1(self):
+        fx = Fixture.from_dict(
+            {
+                "name": "old",
+                "graph_path": GRAPH,
+                "graph_sha256": "x",
+                "outputs": {},
+            }
+        )
+        assert fx.version == 1

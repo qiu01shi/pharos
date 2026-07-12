@@ -34,6 +34,13 @@ class TestOfflineGate:
         assert not res.passed
         assert not res.digest_ok
 
+    async def test_v2_fails_when_graph_integrity_pin_changes(self):
+        fx = await _record()
+        fx.graph_sha256 = "0" * 64
+        res = await runner.test_offline(fx)
+        assert not res.passed
+        assert not res.graph_ok
+
     async def test_assertion_pass(self):
         fx = await _record(
             assertions=[Assertion("__out__.response", "contains", "echo")]

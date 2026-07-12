@@ -101,6 +101,12 @@ def collected_outputs(graph: CompositeGraph) -> dict[str, list[dict[str, Any]]]:
                         "self_hash": tok.self_hash,
                         "prev_hash": tok.prev_hash,
                         "origin": tok.origin,
+                        "ts": tok.ts,
+                        "run_id": tok.run_id,
+                        "iter": tok.iter,
+                        "is_partial": tok.is_partial,
+                        "cost_usd": tok.cost_usd,
+                        "metadata": tok.metadata,
                     }
                 )
         if recs:
@@ -303,10 +309,13 @@ async def test_offline(fixture: Fixture) -> TestResult:
             error=f"{type(e).__name__}: {e}",
         )
 
-    actual_digest = chain_digest(outcome.outputs)
+    actual_digest = chain_digest(outcome.outputs, version=fixture.version)
     digest_ok = actual_digest == fixture.chain_digest
     assertion_results = run_assertions(fixture, outcome.outputs)
-    passed = digest_ok and all(r.ok for r in assertion_results)
+    # v2 makes the graph integrity pin part of the gate.  Legacy v1 fixtures
+    # retain their historical warning-only behavior until re-recorded.
+    graph_gate_ok = graph_ok or fixture.version <= 1
+    passed = graph_gate_ok and digest_ok and all(r.ok for r in assertion_results)
     return TestResult(
         name=fixture.name,
         passed=passed,
@@ -393,7 +402,7 @@ async def test_live(
             mode="live",
         )
 
-    actual_digest = chain_digest(outcome.outputs)
+    actual_digest = chain_digest(outcome.outputs, version=fixture.version)
     digest_ok = actual_digest == fixture.chain_digest
     drift = diff_runs(fixture.outputs, outcome.outputs, graph=graph)
     assertion_results = run_assertions(fixture, outcome.outputs)
