@@ -64,3 +64,4 @@ traces/
 .env.local
 .claude
 .cursor
+.hermes

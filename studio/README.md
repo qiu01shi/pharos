@@ -1,23 +1,30 @@
 # Pharos Studio
 
-Local-first graph and trace workbench for the `pharos.ai/v1` IR.
+Pharos Studio 是 `pharos.ai/v1` 工作流的本地可视化操作台。它通过本地 Runtime API
+完成真实校验和执行，通过 SSE 实时展示节点状态、时间线和最终输出。
 
-## Run locally
+## 本地启动
 
-Node.js 22.13 or newer is required.
+需要 Node.js 22.13+。
+
+终端一：
 
 ```bash
-npm install
+cd ..
+uv sync --all-extras
+uv run pharos serve
+```
+
+终端二：
+
+```bash
+cd studio
+nvm use 24     # 如果已使用 Node 22.13+ 可省略
+npm ci
 npm run dev
 ```
 
-Open the displayed local URL, then load a Pharos YAML/JSON graph. A recorded
-run can be loaded separately to overlay node status, duration, token counts,
-and the fire timeline.
+打开 `http://localhost:3000`，顶部显示 `Runtime v...` 后即可一键启动内置的
+零费用 Faux 演示工作流，也可打开自己的 YAML / JSON 工作流。
 
-```bash
-uv run pharos trace <run_id> --export run.json
-```
-
-Studio currently reads files entirely in the browser and does not execute the
-graph or persist edits. The runtime IR remains the source of truth.
+完整中文说明见 [`docs/studio.md`](../docs/studio.md)。

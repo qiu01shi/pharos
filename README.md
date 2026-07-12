@@ -185,10 +185,17 @@ print(builder.to_yaml())
 Run Studio locally with Node.js 22+:
 
 ```bash
-cd studio && npm install && npm run dev
-# Export a trace, then load both files in Studio:
-uv run pharos trace <run_id> --export run.json
+# Terminal 1: local Runtime API
+uv run pharos serve
+
+# Terminal 2: Studio
+cd studio && npm ci && npm run dev
 ```
+
+Open `http://localhost:3000`, wait for `Runtime v...`, then run the built-in
+zero-cost demo or load a YAML/JSON graph and start it directly from Studio.
+Node status, duration, events, and graph outputs update live over SSE. Manual
+trace export/import remains available for older runs.
 
 See [Studio](docs/studio.md) and [the versioned worker protocol](docs/worker-protocol.md).
 
